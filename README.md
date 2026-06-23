@@ -54,7 +54,7 @@ winget install Google.Protobuf     # for Phase 2 gRPC codegen
 
 **1. Start the full stack**
 ```bash
-cd C2-Adversary
+cd DungeonMaster-C2
 docker-compose up
 ```
 

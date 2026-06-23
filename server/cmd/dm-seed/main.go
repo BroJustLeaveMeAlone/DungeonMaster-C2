@@ -1,4 +1,4 @@
-package main
+﻿package main
 
 import (
 	"context"
@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/BroJustLeaveMeAlone/C2-Adversary/server/internal/db"
+	"github.com/BroJustLeaveMeAlone/DungeonMaster-C2/server/internal/db"
 	"github.com/pquerna/otp/totp"
 	"golang.org/x/crypto/bcrypt"
 )

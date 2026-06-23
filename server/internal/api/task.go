@@ -1,4 +1,4 @@
-package api
+﻿package api
 
 import (
 	"context"
@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/BroJustLeaveMeAlone/C2-Adversary/server/internal/collab"
-	"github.com/BroJustLeaveMeAlone/C2-Adversary/server/internal/db"
+	"github.com/BroJustLeaveMeAlone/DungeonMaster-C2/server/internal/collab"
+	"github.com/BroJustLeaveMeAlone/DungeonMaster-C2/server/internal/db"
 	"go.uber.org/zap"
 )
 

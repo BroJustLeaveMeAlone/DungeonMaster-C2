@@ -16,7 +16,7 @@ var Pool *pgxpool.Pool
 func Init(ctx context.Context) error {
 	dsn := os.Getenv("DM_DB_DSN")
 	if dsn == "" {
-		dsn = "postgres://dm:dm@localhost:5432/dm?sslmode=disable"
+		return fmt.Errorf("db: DM_DB_DSN environment variable is not set")
 	}
 
 	cfg, err := pgxpool.ParseConfig(dsn)

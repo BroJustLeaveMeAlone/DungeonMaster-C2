@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package dm.v1;
 
-option go_package = "github.com/BroJustLeaveMeAlone/C2-Adversary/server/gen/dmv1";
+option go_package = "github.com/BroJustLeaveMeAlone/DungeonMaster-C2/server/gen/dmv1";
 
 import "google/protobuf/timestamp.proto";
 import "google/protobuf/empty.proto";

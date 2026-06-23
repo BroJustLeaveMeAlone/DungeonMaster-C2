@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"strings"
 	"time"
 
-	"github.com/BroJustLeaveMeAlone/C2-Adversary/server/internal/collab"
-	"github.com/BroJustLeaveMeAlone/C2-Adversary/server/internal/db"
-	"github.com/BroJustLeaveMeAlone/C2-Adversary/server/internal/session"
+	"github.com/BroJustLeaveMeAlone/DungeonMaster-C2/server/internal/collab"
+	"github.com/BroJustLeaveMeAlone/DungeonMaster-C2/server/internal/db"
+	"github.com/BroJustLeaveMeAlone/DungeonMaster-C2/server/internal/session"
 	"go.uber.org/zap"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -336,8 +338,21 @@ func writeError(w http.ResponseWriter, code int, msg string) {
 }
 
 func cors(next http.Handler) http.Handler {
+	allowed := make(map[string]bool)
+	if origins := os.Getenv("DM_ALLOWED_ORIGINS"); origins != "" {
+		for _, o := range strings.Split(origins, ",") {
+			if o = strings.TrimSpace(o); o != "" {
+				allowed[o] = true
+			}
+		}
+	}
+	if len(allowed) == 0 {
+		allowed["http://localhost:3000"] = true
+		allowed["http://localhost:5173"] = true
+	}
+
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if origin := r.Header.Get("Origin"); origin != "" {
+		if origin := r.Header.Get("Origin"); origin != "" && allowed[origin] {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
 			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")

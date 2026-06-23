@@ -1,4 +1,4 @@
-package main
+﻿package main
 
 import (
 	"context"
@@ -10,11 +10,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/BroJustLeaveMeAlone/C2-Adversary/server/internal/api"
-	"github.com/BroJustLeaveMeAlone/C2-Adversary/server/internal/collab"
-	"github.com/BroJustLeaveMeAlone/C2-Adversary/server/internal/db"
-	"github.com/BroJustLeaveMeAlone/C2-Adversary/server/internal/session"
-	"github.com/BroJustLeaveMeAlone/C2-Adversary/server/internal/storage"
+	"github.com/BroJustLeaveMeAlone/DungeonMaster-C2/server/internal/api"
+	"github.com/BroJustLeaveMeAlone/DungeonMaster-C2/server/internal/collab"
+	"github.com/BroJustLeaveMeAlone/DungeonMaster-C2/server/internal/db"
+	"github.com/BroJustLeaveMeAlone/DungeonMaster-C2/server/internal/session"
+	"github.com/BroJustLeaveMeAlone/DungeonMaster-C2/server/internal/storage"
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
@@ -47,7 +47,7 @@ func run(log *zap.Logger) error {
 
 	// --- MinIO (evidence + build artifacts) ---------------------------------
 	if err := storage.Init(ctx); err != nil {
-		log.Warn("minio init failed — evidence upload disabled", zap.Error(err))
+		log.Warn("minio init failed â€” evidence upload disabled", zap.Error(err))
 	} else {
 		log.Info("minio connected")
 	}

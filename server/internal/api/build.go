@@ -1,4 +1,4 @@
-package api
+﻿package api
 
 import (
 	"context"
@@ -10,8 +10,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/BroJustLeaveMeAlone/C2-Adversary/server/internal/db"
-	"github.com/BroJustLeaveMeAlone/C2-Adversary/server/internal/storage"
+	"github.com/BroJustLeaveMeAlone/DungeonMaster-C2/server/internal/db"
+	"github.com/BroJustLeaveMeAlone/DungeonMaster-C2/server/internal/storage"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
@@ -233,8 +233,7 @@ func (g *gateway) runBuild(buildID, buildUUID, campaignID, c2Host, c2Port string
 	artifactURL, err := storage.UploadFile(ctx, storage.BucketArtifacts, buildID+".exe", outPath, "application/octet-stream")
 	if err != nil {
 		g.log.Error("minio upload failed", zap.String("build_id", buildID), zap.Error(err))
-		// Fall back to local path URL so it's still accessible
-		setBuildStatus("complete", "file:///artifacts/"+buildID+".exe", "")
+		setBuildStatus("failed", "", "")
 		return
 	}
 

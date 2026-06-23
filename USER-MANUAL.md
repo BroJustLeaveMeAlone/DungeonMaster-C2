@@ -2,7 +2,7 @@
 
 **Version:** 0.1 (Phase 1)
 **Last updated:** 2026-06-23
-**Repository:** github.com/BroJustLeaveMeAlone/C2-Adversary
+**Repository:** github.com/BroJustLeaveMeAlone/DungeonMaster-C2
 
 ---
 
@@ -115,7 +115,7 @@ DungeonMaster is a modular Command & Control framework designed for authorized r
 **1. Clone and enter the project directory.**
 
 ```
-git clone https://github.com/BroJustLeaveMeAlone/C2-Adversary.git DungeonMaster
+git clone https://github.com/BroJustLeaveMeAlone/DungeonMaster-C2.git DungeonMaster
 cd DungeonMaster
 ```
 
@@ -157,7 +157,7 @@ All six containers should show `healthy` or `running`:
 
 **5. Access the UI.**
 
-Navigate to `http://localhost:3000`. Default credentials: `admin` / `Dm@1234!`
+Navigate to `http://localhost:3000`. Log in with the operator credentials you set via `dm-seed` (see below).
 
 TOTP is disabled in development. Do not expose this instance to the internet without enabling TOTP and changing credentials first.
 
@@ -165,10 +165,10 @@ TOTP is disabled in development. Do not expose this instance to the internet wit
 
 | Service | URL | Username | Password |
 |---|---|---|---|
-| Web UI / API | http://localhost:3000 | admin | Dm@1234! |
-| MinIO console | http://localhost:9001 | dmadmin | dmpassword |
-| PostgreSQL | localhost:5432 / db: dm | dm | dm |
-| Redis | localhost:6379 | (none) | dmredis |
+| Web UI / API | http://localhost:3000 | admin | set via `dm-seed` |
+| MinIO console | http://localhost:9001 | `DM_MINIO_ACCESS_KEY` | `DM_MINIO_SECRET_KEY` |
+| PostgreSQL | localhost:5432 / db: dm | `DM_POSTGRES_USER` | `DM_POSTGRES_PASSWORD` |
+| Redis | localhost:6379 | (none) | `DM_REDIS_PASSWORD` |
 
 ### Changing the default operator password
 
@@ -237,7 +237,7 @@ First, get an access token:
 ```
 curl -s -X POST http://localhost:8080/api/v1/auth/login \
   -H 'Content-Type: application/json' \
-  -d '{"username":"admin","password":"Dm@1234!"}' | jq .
+  -d '{"username":"admin","password":"<your-password>"}' | jq .
 ```
 
 Copy the `access_token` from the response. Then create the campaign:
@@ -248,10 +248,10 @@ curl -s -X POST http://localhost:8080/api/v1/campaigns \
   -H 'Content-Type: application/json' \
   -d '{
     "name": "Op Iron Fox",
-    "client_name": "AMIT Corp Internal",
+    "client_name": "Acme Corp (Lab)",
     "objective": "Full domain compromise simulation",
-    "scope_cidrs": ["192.168.10.0/24"],
-    "scope_domains": ["adi-pc.local"]
+    "scope_cidrs": ["10.10.10.0/24"],
+    "scope_domains": ["corp.local"]
   }' | jq .
 ```
 
@@ -658,7 +658,7 @@ MinIO hosts two buckets:
 
 ### Accessing evidence
 
-**MinIO web console:** `http://localhost:9001` — log in as `dmadmin` / `dmpassword`. Browse the `evidence` bucket. Files are stored as binary blobs; download and inspect with the appropriate tool (text viewer, hex editor, etc.) depending on what the task captured.
+**MinIO web console:** `http://localhost:9001` — log in with the `DM_MINIO_ACCESS_KEY` / `DM_MINIO_SECRET_KEY` values from your `.env`. Browse the `evidence` bucket. Files are stored as binary blobs; download and inspect with the appropriate tool (text viewer, hex editor, etc.) depending on what the task captured.
 
 **Presigned URLs:** The `evidence` table in PostgreSQL records a presigned URL for each piece of evidence. Query it directly:
 
@@ -677,7 +677,7 @@ Presigned URLs are valid for 24 hours from generation. Re-generate with the MinI
 
 **Direct download (MinIO S3 API):** With valid credentials:
 ```
-curl -u dmadmin:dmpassword \
+curl -u "$DM_MINIO_ACCESS_KEY:$DM_MINIO_SECRET_KEY" \
   "http://localhost:9000/evidence/{session_id}/{task_id}.bin" \
   -o output.bin
 ```
@@ -697,7 +697,7 @@ WHERE e.campaign_id = '<CAMPAIGN_UUID>';
 
 2. Use the MinIO console's "Select All → Download" functionality per session folder, or use `mc` (MinIO client):
 ```
-mc alias set dm http://localhost:9000 dmadmin dmpassword
+mc alias set dm http://localhost:9000 "$DM_MINIO_ACCESS_KEY" "$DM_MINIO_SECRET_KEY"
 mc cp --recursive dm/evidence/<session_id>/ ./export/
 ```
 
@@ -744,7 +744,7 @@ Build artifact download URLs are presigned MinIO URLs with a 24-hour TTL. They a
 
 **Do not leave `DM_TLS_SKIP_VERIFY=true` in production builds.** This makes the agent accept any certificate, including a defender's MITM proxy.
 
-**Do not use the default credentials in production.** Change `admin` / `Dm@1234!` and the JWT secret before any external exposure.
+**Do not use weak credentials in production.** Set strong values for all secrets in `.env` and run `dm-seed` to set the operator password before any external exposure.
 
 **Do not run Wireshark or Process Hacker on the same machine as a live agent.** The in-loop analysis tool check will trigger and the agent will exit, raising an `EVASION_DETECTED` event visible in the campaign feed.
 

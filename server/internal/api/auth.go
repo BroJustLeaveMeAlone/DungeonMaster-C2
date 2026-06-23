@@ -20,10 +20,11 @@ type contextKeyOperatorID struct{}
 type contextKeyRole struct{}
 
 var jwtSecret = func() []byte {
-	if s := os.Getenv("DM_JWT_SECRET"); s != "" {
-		return []byte(s)
+	s := os.Getenv("DM_JWT_SECRET")
+	if s == "" {
+		panic("DM_JWT_SECRET environment variable is not set")
 	}
-	return []byte("change-me-in-production-jwt-secret-at-least-32b!")
+	return []byte(s)
 }()
 
 type dmClaims struct {

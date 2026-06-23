@@ -39,8 +39,11 @@ var (
 func Init(ctx context.Context) error {
 	endpoint   := envOr("DM_MINIO_ADDR", "minio:9000")
 	publicAddr := envOr("DM_MINIO_PUBLIC_ADDR", "localhost:9000")
-	accessKey  := envOr("DM_MINIO_ACCESS_KEY", "dmadmin")
-	secretKey  := envOr("DM_MINIO_SECRET_KEY", "dmpassword")
+	accessKey  := os.Getenv("DM_MINIO_ACCESS_KEY")
+	secretKey  := os.Getenv("DM_MINIO_SECRET_KEY")
+	if accessKey == "" || secretKey == "" {
+		return fmt.Errorf("minio: DM_MINIO_ACCESS_KEY and DM_MINIO_SECRET_KEY must be set")
+	}
 
 	opts := &minio.Options{
 		Creds:  credentials.NewStaticV4(accessKey, secretKey, ""),

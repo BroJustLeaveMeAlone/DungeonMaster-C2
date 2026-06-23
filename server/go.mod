@@ -1,4 +1,4 @@
-module github.com/BroJustLeaveMeAlone/C2-Adversary/server
+module github.com/BroJustLeaveMeAlone/DungeonMaster-C2/server
 
 go 1.25.0
 

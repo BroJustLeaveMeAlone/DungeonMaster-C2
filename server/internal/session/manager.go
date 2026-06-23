@@ -1,4 +1,4 @@
-package session
+﻿package session
 
 import (
 	"context"
@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/BroJustLeaveMeAlone/C2-Adversary/server/internal/db"
+	"github.com/BroJustLeaveMeAlone/DungeonMaster-C2/server/internal/db"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 )

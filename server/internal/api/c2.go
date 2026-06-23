@@ -1,4 +1,4 @@
-package api
+﻿package api
 
 import (
 	"context"
@@ -8,10 +8,10 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/BroJustLeaveMeAlone/C2-Adversary/server/internal/collab"
-	"github.com/BroJustLeaveMeAlone/C2-Adversary/server/internal/db"
-	"github.com/BroJustLeaveMeAlone/C2-Adversary/server/internal/session"
-	"github.com/BroJustLeaveMeAlone/C2-Adversary/server/internal/storage"
+	"github.com/BroJustLeaveMeAlone/DungeonMaster-C2/server/internal/collab"
+	"github.com/BroJustLeaveMeAlone/DungeonMaster-C2/server/internal/db"
+	"github.com/BroJustLeaveMeAlone/DungeonMaster-C2/server/internal/session"
+	"github.com/BroJustLeaveMeAlone/DungeonMaster-C2/server/internal/storage"
 	"go.uber.org/zap"
 )
 
@@ -20,9 +20,9 @@ import (
 // behind a redirector that validates the traffic profile before forwarding.
 //
 // Protocol (pull model):
-//   POST /r  — agent registers (first contact)
-//   GET  /c  — agent polls for tasks (carries session_id in encrypted header)
-//   POST /c  — agent submits task output
+//   POST /r  â€” agent registers (first contact)
+//   GET  /c  â€” agent polls for tasks (carries session_id in encrypted header)
+//   POST /c  â€” agent submits task output
 type C2Server struct {
 	sessions *session.Manager
 	bus      *collab.Bus
@@ -107,8 +107,8 @@ func (s *C2Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleCallback handles the agent's polling loop.
-// GET  — poll for pending tasks
-// POST — submit task output
+// GET  â€” poll for pending tasks
+// POST â€” submit task output
 func (s *C2Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	// Extract and validate session ID from encrypted header
 	// Phase 1: session ID sent as plaintext in X-Request-ID for simplicity
