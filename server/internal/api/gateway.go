@@ -12,6 +12,8 @@ import (
 	"github.com/BroJustLeaveMeAlone/DungeonMaster-C2/server/internal/collab"
 	"github.com/BroJustLeaveMeAlone/DungeonMaster-C2/server/internal/db"
 	"github.com/BroJustLeaveMeAlone/DungeonMaster-C2/server/internal/session"
+	"github.com/pquerna/otp/totp"
+	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -20,12 +22,13 @@ type gateway struct {
 	sessions *session.Manager
 	bus      *collab.Bus
 	log      *zap.Logger
+	rdb      *redis.Client
 }
 
 // NewHTTPGateway builds the operator-facing REST + SSE handler.
 // grpcAddr is reserved for future grpc-gateway proxying; Phase 1 routes directly.
-func NewHTTPGateway(grpcAddr string, sessions *session.Manager, bus *collab.Bus, log *zap.Logger) http.Handler {
-	g := &gateway{sessions: sessions, bus: bus, log: log}
+func NewHTTPGateway(grpcAddr string, sessions *session.Manager, bus *collab.Bus, rdb *redis.Client, log *zap.Logger) http.Handler {
+	g := &gateway{sessions: sessions, bus: bus, log: log, rdb: rdb}
 	mux := http.NewServeMux()
 
 	// Public — no auth required
@@ -61,6 +64,12 @@ func NewHTTPGateway(grpcAddr string, sessions *session.Manager, bus *collab.Bus,
 // ----- Auth handlers -------------------------------------------------------
 
 func (g *gateway) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if g.rateLimitLogin(r.Context(), r) {
+		w.Header().Set("Retry-After", "60")
+		writeError(w, http.StatusTooManyRequests, "too many login attempts")
+		return
+	}
+
 	var req struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
@@ -90,11 +99,12 @@ func (g *gateway) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// DEV: TOTP disabled — re-enable before deployment
-	// if !totp.Validate(req.TOTPCode, totpSecret) {
-	// 	writeError(w, http.StatusUnauthorized, "invalid TOTP code")
-	// 	return
-	// }
+	if os.Getenv("DM_TOTP_DISABLED") != "true" {
+		if !totp.Validate(req.TOTPCode, totpSecret) {
+			writeError(w, http.StatusUnauthorized, "invalid TOTP code")
+			return
+		}
+	}
 
 	access, refresh, err := IssueToken(operatorID, role)
 	if err != nil {
@@ -324,6 +334,32 @@ func (g *gateway) handleEvents(w http.ResponseWriter, r *http.Request) {
 }
 
 // ----- Helpers -------------------------------------------------------------
+
+// rateLimitLuaScript atomically increments a counter and sets TTL only on first
+// increment. Using Lua avoids the INCR/EXPIRE race where a crash between the two
+// calls leaves a key with no TTL, causing a permanent lockout for that IP.
+const rateLimitLuaScript = `
+local c = redis.call('INCR', KEYS[1])
+if c == 1 then
+    redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+return c`
+
+// rateLimitLogin enforces a fixed-window limit of 5 login attempts per source IP
+// per minute. Uses r.RemoteAddr (not X-Forwarded-For) so the key cannot be
+// spoofed by a client. Fails open on Redis errors to avoid locking operators out.
+func (g *gateway) rateLimitLogin(ctx context.Context, r *http.Request) bool {
+	if g.rdb == nil {
+		return false
+	}
+	ip, _, _ := splitHostPort(r.RemoteAddr)
+	key := "rl:login:" + ip
+	count, err := g.rdb.Eval(ctx, rateLimitLuaScript, []string{key}, 60).Int64()
+	if err != nil {
+		return false
+	}
+	return count > 5
+}
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")

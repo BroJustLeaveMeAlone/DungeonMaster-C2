@@ -28,8 +28,8 @@
 *First version you'd actually take on a real engagement.*
 
 ### Infrastructure
-- [ ] **TOTP enforcement** — enabled by default; opt-out via `DM_TOTP_DISABLED=true`
-- [ ] **Rate limiting** — brute-force protection on `/auth/login` (5 req/min per IP, 429 + lockout)
+- [x] **TOTP enforcement** — enabled by default; opt-out via `DM_TOTP_DISABLED=true`
+- [x] **Rate limiting** — brute-force protection on `/auth/login` (5 req/min per source IP, 429 + 60s lockout; atomic Lua INCR/EXPIRE)
 - [x] **CORS allowlist** — `DM_ALLOWED_ORIGINS` env var; dev default `localhost:3000/5173` only
 - [x] **LICENSE + SECURITY.md** — GPL-3.0 license, responsible disclosure policy
 

@@ -121,7 +121,7 @@ func run(log *zap.Logger) error {
 	httpAddr := envOr("DM_HTTP_ADDR", ":8080")
 	httpServer := &http.Server{
 		Addr:         httpAddr,
-		Handler:      api.NewHTTPGateway(grpcAddr, sessionMgr, bus, log),
+		Handler:      api.NewHTTPGateway(grpcAddr, sessionMgr, bus, rdb, log),
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 0, // 0 = no timeout; needed for streaming endpoints
 		IdleTimeout:  120 * time.Second,
