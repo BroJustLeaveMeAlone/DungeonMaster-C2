@@ -1,0 +1,113 @@
+services:
+  postgres:
+    image: timescale/timescaledb:latest-pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER:     ${DM_POSTGRES_USER:-dm}
+      POSTGRES_PASSWORD: ${DM_POSTGRES_PASSWORD}
+      POSTGRES_DB:       dm
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dm -d dm"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --requirepass ${DM_REDIS_PASSWORD:-dmredis}
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${DM_REDIS_PASSWORD:-dmredis}", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER:     ${DM_MINIO_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${DM_MINIO_SECRET_KEY}
+    volumes:
+      - minio_data:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  server:
+    build:
+      context: ./server
+      dockerfile: ../deploy/docker/Dockerfile.server
+    restart: unless-stopped
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis:    { condition: service_healthy }
+      minio:    { condition: service_healthy }
+    environment:
+      DM_DB_DSN:         postgres://${DM_POSTGRES_USER:-dm}:${DM_POSTGRES_PASSWORD}@postgres:5432/dm?sslmode=disable
+      DM_REDIS_ADDR:     redis:6379
+      DM_REDIS_PASSWORD: ${DM_REDIS_PASSWORD:-dmredis}
+      DM_JWT_SECRET:     "${DM_JWT_SECRET:?DM_JWT_SECRET must be set (generate with: openssl rand -hex 32)}"
+      DM_HTTP_ADDR:        :8080
+      DM_GRPC_ADDR:        :50051
+      DM_C2_ADDR:          :4443
+      DM_TLS_CERT:         /certs/server.crt
+      DM_TLS_KEY:          /certs/server.key
+      DM_MINIO_ADDR:        minio:9000
+      DM_MINIO_PUBLIC_ADDR: "${DM_MINIO_PUBLIC_ADDR:-localhost:9000}"
+      DM_MINIO_ACCESS_KEY:  ${DM_MINIO_ACCESS_KEY}
+      DM_MINIO_SECRET_KEY:  ${DM_MINIO_SECRET_KEY}
+      DM_BUILD_VOLUME:      "${COMPOSE_PROJECT_NAME:-dungeonmaster}_build_artifacts"
+    ports:
+      - "8080:8080"   # operator REST API
+      - "4443:4443"   # C2 listener (agent callbacks)
+    volumes:
+      - ./tls:/certs:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+      - .:/workspace:ro
+      - build_artifacts:/artifacts
+
+  ai:
+    build:
+      context: ./ai
+      dockerfile: ../deploy/docker/Dockerfile.ai
+    restart: unless-stopped
+    depends_on:
+      - server
+    environment:
+      MODEL_PATH:        /models/model.gguf
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    ports:
+      - "8090:8090"
+    volumes:
+      - ai_models:/models
+
+  ui:
+    build:
+      context: ./ui
+      dockerfile: ../deploy/docker/Dockerfile.ui
+    restart: unless-stopped
+    depends_on:
+      - server
+    ports:
+      - "3000:80"
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+  ai_models:
+  build_artifacts:

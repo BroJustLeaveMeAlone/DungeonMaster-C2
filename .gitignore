@@ -1,0 +1,40 @@
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+server/vendor/
+
+# Rust
+agent/target/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Node
+ui/node_modules/
+ui/dist/
+
+# TLS / secrets — never commit actual certs or keys
+tls/*.key
+tls/*.crt
+tls/*.pem
+*.key
+*.crt
+*.pem
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db

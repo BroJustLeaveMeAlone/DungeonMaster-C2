@@ -1,0 +1,13 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-gray-950 text-gray-100 antialiased;
+    background-color: #0d1117;
+  }
+  * {
+    box-sizing: border-box;
+  }
+}

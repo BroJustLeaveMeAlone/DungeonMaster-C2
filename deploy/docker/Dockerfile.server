@@ -1,0 +1,13 @@
+FROM golang:1.25-alpine AS builder
+WORKDIR /build
+COPY go.mod ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /dm-server ./cmd/dm-server
+
+FROM alpine:3.20
+RUN apk add --no-cache ca-certificates tzdata docker-cli
+WORKDIR /app
+COPY --from=builder /dm-server /app/dm-server
+EXPOSE 8080 50051 4443
+ENTRYPOINT ["/app/dm-server"]
