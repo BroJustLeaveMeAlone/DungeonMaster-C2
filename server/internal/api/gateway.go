@@ -55,6 +55,10 @@ func NewHTTPGateway(grpcAddr string, sessions *session.Manager, bus *collab.Bus,
 	protected.HandleFunc("GET /api/v1/builds",        g.handleListBuilds)
 	protected.HandleFunc("POST /api/v1/builds",       g.handleCreateBuild)
 	protected.HandleFunc("GET /api/v1/builds/{id}",   g.handleGetBuild)
+	protected.HandleFunc("GET /api/v1/profiles",          g.handleListProfiles)
+	protected.HandleFunc("POST /api/v1/profiles",         g.handleCreateProfile)
+	protected.HandleFunc("GET /api/v1/profiles/{name}",   g.handleGetProfile)
+	protected.HandleFunc("DELETE /api/v1/profiles/{name}", g.handleDeleteProfile)
 
 	mux.Handle("/api/v1/", httpAuth(protected))
 
@@ -345,8 +349,9 @@ if c == 1 then
 end
 return c`
 
-// rateLimitLogin enforces a fixed-window limit of 5 login attempts per source IP
-// per minute. Uses r.RemoteAddr (not X-Forwarded-For) so the key cannot be
+// rateLimitLogin enforces a hard limit of 5 login attempts per source IP per
+// 60-second window. The Lua INCR returns the post-increment count; blocking at
+// count > 4 means the 5th attempt is the last allowed one. Uses r.RemoteAddr (not X-Forwarded-For) so the key cannot be
 // spoofed by a client. Fails open on Redis errors to avoid locking operators out.
 func (g *gateway) rateLimitLogin(ctx context.Context, r *http.Request) bool {
 	if g.rdb == nil {
@@ -358,7 +363,7 @@ func (g *gateway) rateLimitLogin(ctx context.Context, r *http.Request) bool {
 	if err != nil {
 		return false
 	}
-	return count > 5
+	return count > 4
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

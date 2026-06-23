@@ -31,8 +31,8 @@ A modular, operator-first command-and-control framework built for authorized red
 
 | Component | Stack | What it does |
 |-----------|-------|-------------|
-| `server/` | Go 1.22 | REST + gRPC operator API, C2 listener, session lifecycle, collab bus |
-| `agent/` | Rust (no_std-friendly) | Implant: ECDH key exchange, AES-GCM task encryption, HTTPS channel (DNS/SMB: Phase 2) |
+| `server/` | Go 1.22 | REST + gRPC operator API, C2 listener (HTTPS + TCP), session lifecycle, collab bus |
+| `agent/` | Rust (no_std-friendly) | Implant: ECDH key exchange, AES-GCM task encryption, multi-transport channels (HTTPS/TCP/SMB), sleep encryption, Linux musl target |
 | `ai/` | Python / FastAPI | TTP suggestion engine, evasion advisor, report generator (Claude API) |
 | `ui/` | React + TypeScript | Operator console: session list, xterm.js shell, live event feed, MITRE heatmap |
 | `redirector/` | nginx | Traffic filtering, domain-fronting support, agent callback forwarding |
@@ -88,11 +88,16 @@ All runtime config is environment-variable driven. The key ones:
 |----------|---------|-------------|
 | `DM_DB_DSN` | `postgres://dm:dm@localhost:5432/dm` | PostgreSQL connection string |
 | `DM_REDIS_ADDR` | `localhost:6379` | Redis address |
-| `DM_JWT_SECRET` | *(required — no default)* | Generate: `openssl rand -hex 32` |
-| `DM_HTTP_ADDR` | `:8080` | Operator REST API + UI |
+| `DM_JWT_SECRET` | *(required)* | Generate: `openssl rand -hex 32` |
+| `DM_HTTP_ADDR` | `:8080` | Operator REST API |
 | `DM_GRPC_ADDR` | `:50051` | gRPC service port |
-| `DM_C2_ADDR` | `:4443` | C2 listener (agent callbacks, TLS) |
-| `DM_TLS_CERT` / `DM_TLS_KEY` | `tls/server.crt/.key` | TLS cert for C2 listener |
+| `DM_C2_ADDR` | `:4443` | HTTPS C2 listener (agent callbacks, TLS 1.3) |
+| `DM_TCP_C2_ADDR` | *(unset = disabled)* | Raw TCP C2 listener — e.g. `:4444` |
+| `DM_TLS_CERT` / `DM_TLS_KEY` | `tls/server.crt/.key` | TLS cert for HTTPS C2 |
+| `DM_TOTP_DISABLED` | `false` | Set `true` to bypass TOTP enforcement (dev only) |
+| `DM_C2_PATH_REG` | `/r` | Override agent registration path (malleable profiles) |
+| `DM_C2_PATH_POLL` | `/c` | Override agent poll/callback path (malleable profiles) |
+| `DM_ALLOWED_ORIGINS` | `localhost:3000,localhost:5173` | CORS allowlist for operator UI |
 | `ANTHROPIC_API_KEY` | — | Required for AI report generation |
 
 ---
@@ -119,17 +124,33 @@ GET    /api/v1/campaigns/{id}
 PUT    /api/v1/campaigns/{id}
 
 GET    /api/v1/events                 # SSE stream (?campaign_id= required)
+
+GET    /api/v1/listeners
+POST   /api/v1/listeners
+
+GET    /api/v1/builds                 # (?campaign_id=)
+POST   /api/v1/builds                 # trigger Docker agent build
+GET    /api/v1/builds/{id}
+
+GET    /api/v1/profiles               # malleable C2 profiles
+POST   /api/v1/profiles
+GET    /api/v1/profiles/{name}
+DELETE /api/v1/profiles/{name}
 ```
 
 ---
 
 ## Operator Channels (agent → server)
 
+Paths are configurable via `DM_C2_PATH_REG` / `DM_C2_PATH_POLL` on the server and the malleable profile system — defaults shown below.
+
 ```
 POST /r   — agent registration (first contact, ECDH key exchange)
-GET  /c   — task poll (encrypted session ID in X-Request-ID header)
+GET  /c   — task poll (session ID in X-Request-ID header)
 POST /c   — task output submission
 ```
+
+A raw TCP C2 listener is also available when `DM_TCP_C2_ADDR` is set. Same length-prefixed JSON protocol, no TLS requirement (use behind a stunnel/redirector).
 
 ---
 
@@ -139,7 +160,7 @@ POST /c   — task output submission
 - Session keys derived via ECDH P-256 + HKDF
 - Task payloads encrypted with AES-256-GCM
 - Operator tokens: HS256 JWT, 8h access / 7d refresh
-- Operator login: bcrypt password; TOTP (RFC 6238) scaffolded — mandatory enforcement ships in Phase 2
+- Operator login: bcrypt password + TOTP (RFC 6238) enforced by default; rate-limited to 5 attempts/min per source IP
 - **For authorized use only.** Ensure written authorization from the target organization is in place before deployment.
 
 ---
@@ -151,7 +172,7 @@ DungeonMaster is developed in five phases. **Phase 1 (foundation) is complete.**
 | Phase | Name | Status |
 |-------|------|--------|
 | 1 | Foundation — server, agent, UI, Docker build system | ✅ Complete |
-| 2 | Operational Core — file ops, SMB/TCP channels, malleable C2, TOTP enforcement | 🔲 Planned |
+| 2 | Operational Core — file ops, SMB/TCP channels, malleable C2, TOTP enforcement | ✅ Complete |
 | 3 | Evasion & Injection — process injection, indirect syscalls, unhooking, UDRL | 🔲 Planned |
 | 4 | Post-Exploitation Module Library — creds, AD/Kerberos, lateral movement, cloud, Linux/macOS | 🔲 Planned |
 | 5 | Beyond Cobalt Strike — AI co-pilot, BOF loader, kill chain templates, MITRE heatmap, collaboration | 🔲 Planned |

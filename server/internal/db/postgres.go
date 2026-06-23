@@ -212,6 +212,15 @@ CREATE TABLE IF NOT EXISTS ttp_mappings (
     confirmed_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS c2_profiles (
+    name          TEXT PRIMARY KEY,
+    user_agent    TEXT NOT NULL DEFAULT '',
+    register_path TEXT NOT NULL DEFAULT '/r',
+    poll_path     TEXT NOT NULL DEFAULT '/c',
+    extra_headers JSONB NOT NULL DEFAULT '[]',
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS audit_log (
     id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     operator_id  UUID,

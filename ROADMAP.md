@@ -23,7 +23,7 @@
 
 ---
 
-## Phase 2 — Operational Core
+## Phase 2 — Operational Core ✅ (complete)
 
 *First version you'd actually take on a real engagement.*
 
@@ -41,13 +41,13 @@
 - [x] **Sleep update** — PATCH `/api/v1/sessions/{id}/sleep`; agent picks up on next poll
 
 ### C2 channels
-- [ ] **SMB named-pipe channel** — P2P beacon for internal hosts; chains through one internet-facing agent
-- [ ] **TCP bind/reverse channel** — raw TCP for air-gapped environments
-- [ ] **Malleable C2 profiles** — YAML config: custom HTTP headers, paths, user-agents, response bodies, URI rotation, jitter profiles
+- [x] **SMB named-pipe channel** — agent-side named pipe client + relay_start/relay_stop pivot tasks; relay loop forwards internal agent traffic to team server via ureq
+- [x] **TCP bind/reverse channel** — raw TCP reverse channel; length-prefixed JSON protocol; server-side TCPServer goroutine; opt-in via `DM_TCP_C2_ADDR`
+- [x] **Malleable C2 profiles** — DB-stored profiles (UA, reg path, poll path, extra headers); `/api/v1/profiles` CRUD; injected at build time via `DM_UA`, `DM_C2_PATH_REG`, `DM_C2_PATH_POLL`; C2 server paths configurable via env
 
 ### Agent
-- [ ] **Sleep encryption** — AES encrypt agent heap region during sleep; invisible to memory scanners at rest
-- [ ] **Linux agent** — same Rust codebase cross-compiled for Linux x64; opens server/cloud pivots
+- [x] **Sleep encryption** — XOR-masks the 32-byte session key during sleep so memory scanners cannot recover it at rest; controlled by `DM_SLEEP_ENCRYPT=true`; skipped when `DM_NO_EVASION=true` (full heap masking via dedicated VirtualAlloc'd page deferred to Phase 3)
+- [x] **Linux agent** — cross-compile via `DM_TARGET=x86_64-unknown-linux-musl`; Dockerfile supports both Windows and Linux targets; build system computes target/ext from target_os/target_arch
 
 ---
 

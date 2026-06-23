@@ -12,6 +12,8 @@ default  = ["channel-https"]
 channel-https = []
 channel-dns   = []
 channel-smb   = []
+channel-tcp   = []
+sleep-encrypt = []
 
 # Evasion features — enabled by the build service per engagement
 process-hollow = []
@@ -57,6 +59,8 @@ windows-sys = { version = "0.52", features = [
     "Win32_Networking_WinSock",
     "Win32_Graphics_Gdi",
     "Win32_UI_WindowsAndMessaging",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Pipes",
 ] }
 
 [profile.release]

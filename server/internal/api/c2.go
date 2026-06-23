@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 
 	"github.com/BroJustLeaveMeAlone/DungeonMaster-C2/server/internal/collab"
 	"github.com/BroJustLeaveMeAlone/DungeonMaster-C2/server/internal/db"
@@ -42,8 +43,10 @@ func NewC2Server(sessions *session.Manager, bus *collab.Bus, log *zap.Logger) *h
 		log:      log,
 		mux:      http.NewServeMux(),
 	}
-	s.mux.HandleFunc("/r", s.handleRegister)
-	s.mux.HandleFunc("/c", s.handleCallback)
+	regPath  := envOrC2("DM_C2_PATH_REG", "/r")
+	pollPath := envOrC2("DM_C2_PATH_POLL", "/c")
+	s.mux.HandleFunc(regPath, s.handleRegister)
+	s.mux.HandleFunc(pollPath, s.handleCallback)
 
 	return &http.Server{
 		Handler: s.mux,
@@ -205,12 +208,16 @@ func (s *C2Server) handleOutput(w http.ResponseWriter, r *http.Request, sessionI
 }
 
 func (s *C2Server) storeEvidence(sess *session.Session, taskID string, output []byte) {
+	storeEvidence(s.log, sess, taskID, output)
+}
+
+func storeEvidence(log *zap.Logger, sess *session.Session, taskID string, output []byte) {
 	ctx := context.Background()
 	contentType, ext, evidenceType := inferContentType(output)
 	objectName := fmt.Sprintf("%s/%s%s", sess.ID, taskID, ext)
 	url, err := storage.UploadBytes(ctx, storage.BucketEvidence, objectName, output, contentType)
 	if err != nil {
-		s.log.Warn("evidence upload failed", zap.String("task_id", taskID), zap.Error(err))
+		log.Warn("evidence upload failed", zap.String("task_id", taskID), zap.Error(err))
 		return
 	}
 
@@ -225,7 +232,7 @@ func (s *C2Server) storeEvidence(sess *session.Session, taskID string, output []
 		campaignID, sess.ID, taskID, evidenceType, url, taskID+ext,
 	)
 	if err != nil {
-		s.log.Warn("evidence record failed", zap.String("task_id", taskID), zap.Error(err))
+		log.Warn("evidence record failed", zap.String("task_id", taskID), zap.Error(err))
 	}
 }
 
@@ -234,6 +241,13 @@ func inferContentType(data []byte) (contentType, ext, evidenceType string) {
 		return "image/bmp", ".bmp", "screenshot"
 	}
 	return "application/octet-stream", ".bin", "task_output"
+}
+
+func envOrC2(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
 }
 
 func extractIP(r *http.Request) string {

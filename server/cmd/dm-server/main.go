@@ -150,6 +150,16 @@ func run(log *zap.Logger) error {
 		}
 	}()
 
+	// --- TCP C2 listener (optional raw TCP channel) -----------------------
+	if tcpAddr := os.Getenv("DM_TCP_C2_ADDR"); tcpAddr != "" {
+		tcpServer := api.NewTCPServer(sessionMgr, bus, log)
+		go func() {
+			if err := tcpServer.Serve(ctx, tcpAddr); err != nil {
+				log.Error("TCP C2 error", zap.Error(err))
+			}
+		}()
+	}
+
 	// --- Wait for shutdown --------------------------------------------------
 	<-ctx.Done()
 	log.Info("shutdown signal received")
