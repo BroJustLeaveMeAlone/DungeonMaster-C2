@@ -2,7 +2,7 @@
 
 ## Supported Versions
 
-Only the latest commit on `main` is actively maintained.
+Only the latest commit on `master` is actively maintained.
 
 ## Reporting a Vulnerability
 
@@ -26,6 +26,10 @@ Users are responsible for ensuring they have written authorization before deploy
 Vulnerabilities in the framework itself (server auth bypass, agent key extraction, credential exposure)
 are in scope. Issues with community-contributed modules or third-party dependencies should be
 reported to their respective maintainers.
+
+**The tool's intended offensive capabilities — credential dumping, process injection, lateral movement,
+persistence, and related techniques — are features, not vulnerabilities. Reports about the tool
+functioning as designed will be closed without action.**
 
 ## Disclosure Policy
 
