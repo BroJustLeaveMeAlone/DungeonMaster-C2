@@ -32,7 +32,7 @@ A modular, operator-first command-and-control framework built for authorized red
 | Component | Stack | What it does |
 |-----------|-------|-------------|
 | `server/` | Go 1.22 | REST + gRPC operator API, C2 listener, session lifecycle, collab bus |
-| `agent/` | Rust (no_std-friendly) | Implant: ECDH key exchange, AES-GCM task encryption, HTTPS/DNS/SMB channels |
+| `agent/` | Rust (no_std-friendly) | Implant: ECDH key exchange, AES-GCM task encryption, HTTPS channel (DNS/SMB: Phase 2) |
 | `ai/` | Python / FastAPI | TTP suggestion engine, evasion advisor, report generator (Claude API) |
 | `ui/` | React + TypeScript | Operator console: session list, xterm.js shell, live event feed, MITRE heatmap |
 | `redirector/` | nginx | Traffic filtering, domain-fronting support, agent callback forwarding |
@@ -88,7 +88,7 @@ All runtime config is environment-variable driven. The key ones:
 |----------|---------|-------------|
 | `DM_DB_DSN` | `postgres://dm:dm@localhost:5432/dm` | PostgreSQL connection string |
 | `DM_REDIS_ADDR` | `localhost:6379` | Redis address |
-| `DM_JWT_SECRET` | *(hardcoded fallback)* | **Override this in production** |
+| `DM_JWT_SECRET` | *(required — no default)* | Generate: `openssl rand -hex 32` |
 | `DM_HTTP_ADDR` | `:8080` | Operator REST API + UI |
 | `DM_GRPC_ADDR` | `:50051` | gRPC service port |
 | `DM_C2_ADDR` | `:4443` | C2 listener (agent callbacks, TLS) |
@@ -139,11 +139,25 @@ POST /c   — task output submission
 - Session keys derived via ECDH P-256 + HKDF
 - Task payloads encrypted with AES-256-GCM
 - Operator tokens: HS256 JWT, 8h access / 7d refresh
-- Operator login requires bcrypt password + TOTP (RFC 6238)
+- Operator login: bcrypt password; TOTP (RFC 6238) scaffolded — mandatory enforcement ships in Phase 2
 - **For authorized use only.** Ensure written authorization from the target organization is in place before deployment.
+
+---
+
+## Roadmap
+
+DungeonMaster is developed in five phases. **Phase 1 (foundation) is complete.** See [ROADMAP.md](ROADMAP.md) for the full checklist — every planned module, evasion primitive, and capability is listed with its target phase.
+
+| Phase | Name | Status |
+|-------|------|--------|
+| 1 | Foundation — server, agent, UI, Docker build system | ✅ Complete |
+| 2 | Operational Core — file ops, SMB/TCP channels, malleable C2, TOTP enforcement | 🔲 Planned |
+| 3 | Evasion & Injection — process injection, indirect syscalls, unhooking, UDRL | 🔲 Planned |
+| 4 | Post-Exploitation Module Library — creds, AD/Kerberos, lateral movement, cloud, Linux/macOS | 🔲 Planned |
+| 5 | Beyond Cobalt Strike — AI co-pilot, BOF loader, kill chain templates, MITRE heatmap, collaboration | 🔲 Planned |
 
 ---
 
 ## License
 
-MIT
+GPL-3.0 — see [LICENSE](LICENSE). Free to use, modify, and distribute; derivative works must remain open-source under the same terms.
