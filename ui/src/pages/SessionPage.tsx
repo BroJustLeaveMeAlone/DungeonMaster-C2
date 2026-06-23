@@ -2,6 +2,7 @@ import { useParams, Link } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '../api/client'
 import { SessionConsole } from '../components/session/SessionConsole'
+import { SessionActions } from '../components/session/SessionActions'
 
 interface Session {
   id:             string
@@ -106,6 +107,14 @@ export function SessionPage() {
           )}
         </div>
       )}
+
+      {/* Action bar */}
+      <SessionActions
+        sessionId={sessionId!}
+        sleepSeconds={session.sleep_seconds}
+        jitterPct={session.jitter_pct}
+        onSleepUpdated={() => qc.invalidateQueries({ queryKey: ['session', sessionId] })}
+      />
 
       {/* Terminal */}
       <div className="flex-1 p-3 min-h-0">

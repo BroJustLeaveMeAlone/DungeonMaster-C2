@@ -75,8 +75,10 @@ fn main() {
             return;
         }
 
+        let mut exit_requested = false;
         for task in poll.tasks {
-            let output = executor::run(&task);
+            let output       = executor::run(&task);
+            let should_exit  = output.should_exit;
             let evasion_event = output.evasion_detected;
 
             let _ = ch.submit_output(
@@ -88,6 +90,16 @@ fn main() {
                 evasion_event,
                 output.evasion_description.unwrap_or_default(),
             );
+
+            if should_exit {
+                exit_requested = true;
+                break;
+            }
+        }
+
+        if exit_requested {
+            evasion::cleanup();
+            return;
         }
     }
 }

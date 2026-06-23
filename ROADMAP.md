@@ -30,15 +30,15 @@
 ### Infrastructure
 - [ ] **TOTP enforcement** — enabled by default; opt-out via `DM_TOTP_DISABLED=true`
 - [ ] **Rate limiting** — brute-force protection on `/auth/login` (5 req/min per IP, 429 + lockout)
-- [ ] **CORS allowlist** — `DM_ALLOWED_ORIGINS` env var; dev default `localhost:3000/5173` only
-- [ ] **LICENSE + SECURITY.md** — GPL-3.0 license, responsible disclosure policy
+- [x] **CORS allowlist** — `DM_ALLOWED_ORIGINS` env var; dev default `localhost:3000/5173` only
+- [x] **LICENSE + SECURITY.md** — GPL-3.0 license, responsible disclosure policy
 
 ### Task types
-- [ ] **File upload** — operator → agent; chunked transfer, progress in UI
-- [ ] **File download** — agent → MinIO; auto-stored as evidence
-- [ ] **Screenshot** — GDI capture, stored in evidence bucket
-- [ ] **Kill** — clean agent shutdown with cleanup
-- [ ] **Sleep update** — change beacon interval on a live session without rebuild
+- [x] **File upload** — operator → agent; written to target path via `download` task
+- [x] **File download** — agent → operator; reads target file via `upload` task, auto-stored as evidence
+- [x] **Screenshot** — GDI BitBlt capture, BMP stored in evidence bucket, displayed in UI
+- [x] **Kill** — clean agent shutdown via `kill` task type; agent exits after submitting output
+- [x] **Sleep update** — PATCH `/api/v1/sessions/{id}/sleep`; agent picks up on next poll
 
 ### C2 channels
 - [ ] **SMB named-pipe channel** — P2P beacon for internal hosts; chains through one internet-facing agent
@@ -75,6 +75,9 @@
 ### Loader
 - [ ] **UDRL (user-defined reflective loader)** — custom PE loader; replaces default loader to bypass static and behavioral loader detections
 - [ ] **Staged payload** — small stager (~8KB) pulls full agent over C2; minimal initial AV surface
+
+### Cleanup
+- [ ] **Agent self-delete** — on kill, overwrite and delete the agent binary from disk before exiting
 
 ---
 

@@ -103,11 +103,12 @@ pub struct TaskOutput {
     pub success:             bool,
     pub evasion_detected:    bool,
     pub evasion_description: Option<String>,
+    pub should_exit:         bool,
 }
 
 impl TaskOutput {
     pub fn success(data: Vec<u8>) -> Self {
-        Self { data, success: true, evasion_detected: false, evasion_description: None }
+        Self { data, success: true, evasion_detected: false, evasion_description: None, should_exit: false }
     }
 
     pub fn failure(msg: &str) -> Self {
@@ -116,6 +117,7 @@ impl TaskOutput {
             success:             false,
             evasion_detected:    false,
             evasion_description: None,
+            should_exit:         false,
         }
     }
 
@@ -125,6 +127,17 @@ impl TaskOutput {
             success:             false,
             evasion_detected:    true,
             evasion_description: Some(description),
+            should_exit:         false,
+        }
+    }
+
+    pub fn kill() -> Self {
+        Self {
+            data:                b"kill acknowledged".to_vec(),
+            success:             true,
+            evasion_detected:    false,
+            evasion_description: None,
+            should_exit:         true,
         }
     }
 }

