@@ -49,8 +49,13 @@ func NewC2Server(sessions *session.Manager, bus *collab.Bus, log *zap.Logger) *h
 	s.mux.HandleFunc(pollPath, s.handleCallback)
 	s.mux.HandleFunc("/stage/", s.handleStage)
 
+	logged := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		log.Info("c2 http request", zap.String("method", r.Method), zap.String("path", r.URL.Path), zap.String("remote", r.RemoteAddr))
+		s.mux.ServeHTTP(w, r)
+	})
+
 	return &http.Server{
-		Handler: s.mux,
+		Handler: logged,
 		TLSConfig: &tls.Config{
 			MinVersion: tls.VersionTLS13,
 		},

@@ -7,9 +7,6 @@ RUN rustup target add x86_64-pc-windows-gnu x86_64-unknown-linux-musl
 WORKDIR /build
 COPY agent/ .
 
-# Target selects the Rust cross-compile triple and output binary name.
-# Windows:  DM_TARGET=x86_64-pc-windows-gnu   DM_BIN=dm-agent.exe
-# Linux x64: DM_TARGET=x86_64-unknown-linux-musl DM_BIN=dm-agent
 ARG DM_TARGET=x86_64-pc-windows-gnu
 ARG DM_BIN=dm-agent.exe
 
@@ -47,13 +44,23 @@ ENV DM_TARGET=$DM_TARGET \
     DM_SMB_HOST=$DM_SMB_HOST \
     DM_SMB_PIPE=$DM_SMB_PIPE
 
-RUN if [ -n "$DM_FEATURES" ]; then \
+RUN mkdir /output
+
+# Cache mounts persist across builds regardless of layer invalidation.
+# Registry: downloaded crate sources (~5-10s saved).
+# Target:   compiled .rlib artifacts for all dependencies (~50-60s saved after first build).
+# sharing=locked: serialise concurrent builds to avoid Cargo file-lock races.
+# The binary is copied to /output/ so the final stage can access it outside the cache mount.
+RUN --mount=type=cache,id=dm-cargo-registry,target=/root/.cargo/registry \
+    --mount=type=cache,id=dm-cargo-git,target=/root/.cargo/git \
+    --mount=type=cache,id=dm-cargo-target,target=/build/target,sharing=locked \
+    if [ -n "$DM_FEATURES" ]; then \
         cargo build --release --target $DM_TARGET --features "$DM_FEATURES"; \
     else \
         cargo build --release --target $DM_TARGET; \
-    fi
+    fi && \
+    cp /build/target/${DM_TARGET}/release/${DM_BIN} /output/${DM_BIN}
 
 FROM alpine:3.20
-ARG DM_TARGET=x86_64-pc-windows-gnu
 ARG DM_BIN=dm-agent.exe
-COPY --from=builder /build/target/${DM_TARGET}/release/${DM_BIN} /${DM_BIN}
+COPY --from=builder /output/${DM_BIN} /${DM_BIN}

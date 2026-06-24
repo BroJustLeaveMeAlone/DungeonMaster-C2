@@ -2,6 +2,7 @@
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"net/http"
@@ -143,9 +144,8 @@ func run(log *zap.Logger) error {
 	go func() {
 		certFile := envOr("DM_TLS_CERT", "tls/server.crt")
 		keyFile  := envOr("DM_TLS_KEY",  "tls/server.key")
-		c2Server.Addr = c2Addr
 		log.Info("C2 listener starting", zap.String("addr", c2Addr))
-		if err := c2Server.ListenAndServeTLS(certFile, keyFile); err != nil {
+		if err := serveC2TLS(c2Server, c2Addr, certFile, keyFile, log); err != nil {
 			log.Error("c2 listener error", zap.Error(err))
 		}
 	}()
@@ -183,4 +183,36 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// serveC2TLS wraps the C2 http.Server with a logging TCP listener so every
+// inbound connection attempt is recorded before TLS negotiation begins.
+// This makes it possible to distinguish "agent never connected" (abort_if_sandboxed
+// or pre-network exit) from "agent connected but TLS failed" (cert/verify mismatch).
+func serveC2TLS(srv *http.Server, addr, certFile, keyFile string, log *zap.Logger) error {
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return fmt.Errorf("load tls cert: %w", err)
+	}
+	cfg := srv.TLSConfig.Clone()
+	cfg.Certificates = []tls.Certificate{cert}
+
+	raw, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("tcp listen %s: %w", addr, err)
+	}
+	return srv.Serve(tls.NewListener(tcpLogListener{raw, log}, cfg))
+}
+
+type tcpLogListener struct {
+	net.Listener
+	log *zap.Logger
+}
+
+func (l tcpLogListener) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err == nil {
+		l.log.Info("c2 tcp connect", zap.String("remote", conn.RemoteAddr().String()))
+	}
+	return conn, err
 }

