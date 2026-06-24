@@ -24,23 +24,23 @@ interface Campaign {
 }
 
 interface BusEvent {
-  id:          string
-  type:        string
-  session_id?: string
-  operator_id?:string
-  payload?:    unknown
-  occurred_at: string
+  id:           string
+  type:         string
+  session_id?:  string
+  operator_id?: string
+  payload?:     unknown
+  occurred_at:  string
 }
 
 const EVENT_COLORS: Record<string, string> = {
-  SESSION_CHECKIN:   '#3fb950',
-  SESSION_REVOKED:   '#f85149',
-  TASK_QUEUED:       '#58a6ff',
-  TASK_OUTPUT:       '#c9d1d9',
-  EVASION_DETECTED:  '#d29922',
-  BUILD_COMPLETE:    '#bc8cff',
-  OPERATOR_JOINED:   '#484f58',
-  OPERATOR_LEFT:     '#484f58',
+  SESSION_CHECKIN:  'var(--dm-accent)',
+  SESSION_REVOKED:  'var(--dm-red)',
+  TASK_QUEUED:      'var(--dm-blue)',
+  TASK_OUTPUT:      'var(--dm-text-hi)',
+  EVASION_DETECTED: 'var(--dm-amber)',
+  BUILD_COMPLETE:   'var(--dm-purple)',
+  OPERATOR_JOINED:  'var(--dm-text-mid)',
+  OPERATOR_LEFT:    'var(--dm-text-mid)',
 }
 
 export function CampaignPage() {
@@ -55,10 +55,10 @@ export function CampaignPage() {
   })
 
   const { data: sessions = [], refetch: refetchSessions } = useQuery<Session[]>({
-    queryKey:       ['sessions', campaignId],
-    queryFn:        () => api.get(`/api/v1/sessions?campaign_id=${campaignId}`).then(r => r.data),
+    queryKey:        ['sessions', campaignId],
+    queryFn:         () => api.get(`/api/v1/sessions?campaign_id=${campaignId}`).then(r => r.data),
     refetchInterval: 15_000,
-    enabled:        !!campaignId,
+    enabled:         !!campaignId,
   })
 
   useEffect(() => {
@@ -82,86 +82,120 @@ export function CampaignPage() {
   const aliveSessions = sessions.filter(s => s.is_alive)
 
   return (
-    <div className="min-h-screen flex flex-col" style={{ background: '#0d1117' }}>
+    <div className="min-h-screen flex flex-col" style={{ background: 'var(--dm-bg)' }}>
+
       {/* Header */}
-      <div className="border-b border-gray-800 px-6 py-3 flex items-center gap-4">
-        <Link to="/" className="text-gray-600 hover:text-gray-300 text-xs font-mono transition-colors">
+      <div
+        className="flex items-center gap-4 px-6 py-2.5 flex-wrap"
+        style={{ borderBottom: '1px solid var(--dm-border)', borderTop: '2px solid var(--dm-accent-lo)' }}
+      >
+        <Link
+          to="/"
+          style={{ color: 'var(--dm-text-lo)', fontSize: '0.72rem', textDecoration: 'none', flexShrink: 0, transition: 'color 0.1s' }}
+          onMouseEnter={e => (e.currentTarget.style.color = 'var(--dm-text-mid)')}
+          onMouseLeave={e => (e.currentTarget.style.color = 'var(--dm-text-lo)')}
+        >
           ← dashboard
         </Link>
-        <h1 className="font-mono font-bold text-white">{campaign.name}</h1>
-        <span className="text-gray-500 text-sm">{campaign.client_name}</span>
-        <span className="text-gray-700 text-xs ml-auto hidden lg:block truncate max-w-xs">
-          {campaign.objective}
+        <span style={{ color: 'var(--dm-text-lo)' }}>|</span>
+        <span style={{ color: 'var(--dm-text-hi)', fontWeight: 700, fontSize: '0.88rem', letterSpacing: '0.04em' }}>
+          {campaign.name}
         </span>
+        <span style={{ color: 'var(--dm-text-mid)', fontSize: '0.78rem' }}>{campaign.client_name}</span>
+        {campaign.objective && (
+          <span
+            className="hidden lg:block truncate ml-auto max-w-xs"
+            style={{ color: 'var(--dm-text-lo)', fontSize: '0.72rem' }}
+            title={campaign.objective}
+          >
+            {campaign.objective}
+          </span>
+        )}
       </div>
 
       <div className="flex flex-1 min-h-0 overflow-hidden">
-        {/* Session list */}
-        <div className="flex-1 p-6 overflow-y-auto">
-          <h2 className="text-xs text-gray-600 uppercase tracking-widest mb-3">
-            Sessions{' '}
-            <span style={{ color: '#3fb950' }}>{aliveSessions.length} alive</span>
-            {' '}/ {sessions.length} total
-          </h2>
 
-          <div className="space-y-2">
-            {sessions.map(s => (
-              <Link
-                key={s.id}
-                to={`/campaigns/${campaignId}/sessions/${s.id}`}
-                className="flex items-center gap-3 border border-gray-800 rounded-lg px-4 py-3 font-mono hover:border-green-900 transition-colors"
-                style={{ background: '#161b22' }}
-              >
-                <span
-                  className="h-2 w-2 rounded-full flex-shrink-0"
-                  style={{ background: s.is_alive ? '#3fb950' : '#484f58' }}
-                />
-                <span className="text-white font-bold text-sm flex-shrink-0">{s.hostname}</span>
-                <span className="text-gray-400 text-sm">{s.username}</span>
-                {s.is_elevated && (
-                  <span className="text-xs border border-red-900 rounded px-1 flex-shrink-0" style={{ color: '#f85149' }}>
-                    ELEV
-                  </span>
-                )}
-                <span className="text-gray-600 text-xs flex-shrink-0">{s.os}</span>
-                <span className="text-gray-700 text-xs ml-auto flex-shrink-0">
-                  {new Date(s.last_seen).toLocaleTimeString()}
-                </span>
-                <span className="text-xs ml-2 flex-shrink-0" style={{ color: '#3fb950' }}>→</span>
-              </Link>
-            ))}
-
-            {sessions.length === 0 && (
-              <p className="text-gray-700 text-sm py-4">
-                No sessions yet. Deploy an agent with campaign_id{' '}
-                <code className="text-gray-500 font-mono text-xs">{campaignId}</code>.
-              </p>
-            )}
+        {/* Sessions list */}
+        <div className="flex-1 overflow-y-auto p-6">
+          <div className="dm-section mb-4">
+            Sessions&nbsp;
+            <span style={{ color: 'var(--dm-accent)', fontWeight: 600 }}>{aliveSessions.length} alive</span>
+            &nbsp;/&nbsp;{sessions.length} total
           </div>
+
+          {sessions.length === 0 ? (
+            <p style={{ color: 'var(--dm-text-lo)', fontSize: '0.78rem' }}>
+              No sessions yet. Deploy an agent with campaign_id&nbsp;
+              <code style={{ color: 'var(--dm-text-mid)' }}>{campaignId}</code>.
+            </p>
+          ) : (
+            <div className="space-y-1.5">
+              {sessions.map(s => (
+                <Link
+                  key={s.id}
+                  to={`/campaigns/${campaignId}/sessions/${s.id}`}
+                  className="dm-card flex items-center gap-3"
+                  style={{ padding: '0.65rem 1rem' }}
+                >
+                  <span
+                    className={s.is_alive ? 'dm-alive' : undefined}
+                    style={{
+                      width: '6px', height: '6px',
+                      borderRadius: '50%',
+                      flexShrink: 0,
+                      background: s.is_alive ? 'var(--dm-accent)' : 'var(--dm-text-lo)',
+                    }}
+                  />
+                  <span style={{ color: 'var(--dm-text-hi)', fontWeight: 600, fontSize: '0.82rem', flexShrink: 0 }}>
+                    {s.hostname}
+                  </span>
+                  <span style={{ color: 'var(--dm-text-mid)', fontSize: '0.78rem', flexShrink: 0 }}>
+                    {s.username}
+                  </span>
+                  {s.is_elevated && (
+                    <span className="dm-badge" style={{ color: 'var(--dm-red)', borderColor: 'rgba(255,58,76,0.3)' }}>
+                      SYSTEM
+                    </span>
+                  )}
+                  <span style={{ color: 'var(--dm-text-lo)', fontSize: '0.72rem', flexShrink: 0 }}>{s.os}</span>
+                  <span style={{ color: 'var(--dm-text-lo)', fontSize: '0.68rem', marginLeft: 'auto', flexShrink: 0 }}>
+                    {new Date(s.last_seen).toLocaleTimeString()}
+                  </span>
+                  <span style={{ color: 'var(--dm-accent-lo)', fontSize: '0.72rem', flexShrink: 0 }}>→</span>
+                </Link>
+              ))}
+            </div>
+          )}
         </div>
 
         {/* Event feed */}
         <div
-          className="w-80 border-l border-gray-800 flex flex-col flex-shrink-0"
-          style={{ background: '#0d1117' }}
+          className="flex flex-col flex-shrink-0 overflow-hidden"
+          style={{ width: '300px', borderLeft: '1px solid var(--dm-border)' }}
         >
-          <div className="px-4 py-2 border-b border-gray-800 text-xs text-gray-600 uppercase tracking-widest">
-            Event Feed
+          <div
+            className="flex items-center px-4 py-2.5"
+            style={{ borderBottom: '1px solid var(--dm-border)', flexShrink: 0 }}
+          >
+            <span className="dm-section" style={{ flex: 1 }}>Event Feed</span>
           </div>
-          <div className="flex-1 overflow-y-auto p-3 space-y-1">
+
+          <div className="flex-1 overflow-y-auto p-3" style={{ minHeight: 0 }}>
             {events.length === 0 && (
-              <p className="text-gray-700 text-xs py-2">Waiting for events…</p>
+              <p style={{ color: 'var(--dm-text-lo)', fontSize: '0.72rem', paddingTop: '0.5rem' }}>
+                Waiting for events…
+              </p>
             )}
             {events.map(ev => (
-              <div key={ev.id} className="font-mono text-xs leading-relaxed">
-                <span className="text-gray-700">
-                  {new Date(ev.occurred_at).toLocaleTimeString()}{' '}
+              <div key={ev.id} style={{ fontSize: '0.72rem', lineHeight: '1.6', padding: '0.1rem 0' }}>
+                <span style={{ color: 'var(--dm-text-lo)' }}>
+                  {new Date(ev.occurred_at).toLocaleTimeString()}&nbsp;
                 </span>
-                <span style={{ color: EVENT_COLORS[ev.type] ?? '#8b949e' }}>
+                <span style={{ color: EVENT_COLORS[ev.type] ?? 'var(--dm-text-mid)' }}>
                   {ev.type}
                 </span>
                 {ev.session_id && (
-                  <span className="text-gray-700"> {ev.session_id.slice(0, 8)}</span>
+                  <span style={{ color: 'var(--dm-text-lo)' }}>&nbsp;{ev.session_id.slice(0, 8)}</span>
                 )}
               </div>
             ))}

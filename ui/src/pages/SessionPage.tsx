@@ -29,10 +29,10 @@ export function SessionPage() {
   const qc = useQueryClient()
 
   const { data: session } = useQuery<Session>({
-    queryKey:       ['session', sessionId],
-    queryFn:        () => api.get(`/api/v1/sessions/${sessionId}`).then(r => r.data),
+    queryKey:        ['session', sessionId],
+    queryFn:         () => api.get(`/api/v1/sessions/${sessionId}`).then(r => r.data),
     refetchInterval: 15_000,
-    enabled:        !!sessionId,
+    enabled:         !!sessionId,
   })
 
   const revoke = useMutation({
@@ -43,67 +43,103 @@ export function SessionPage() {
 
   if (!session || !sessionId) return null
 
-  const detectionBar = session.edr_detected.length > 0 || session.av_detected.length > 0
+  const hasDetections = session.edr_detected.length > 0 || session.av_detected.length > 0
 
   return (
-    <div className="h-screen flex flex-col overflow-hidden" style={{ background: '#0d1117' }}>
-      {/* Top bar */}
-      <div className="border-b border-gray-800 px-4 py-2 flex items-center gap-3 font-mono text-sm flex-wrap">
+    <div className="h-screen flex flex-col overflow-hidden" style={{ background: 'var(--dm-bg)' }}>
+
+      {/* Header bar */}
+      <div
+        className="flex items-center gap-3 px-4 py-2 flex-wrap flex-shrink-0"
+        style={{
+          borderBottom: '1px solid var(--dm-border)',
+          borderTop: '2px solid var(--dm-accent-lo)',
+          minHeight: '38px',
+        }}
+      >
         <Link
           to={campaignId ? `/campaigns/${campaignId}` : '/'}
-          className="text-gray-600 hover:text-gray-300 text-xs transition-colors"
+          style={{ color: 'var(--dm-text-lo)', fontSize: '0.7rem', textDecoration: 'none', flexShrink: 0, transition: 'color 0.1s' }}
+          onMouseEnter={e => (e.currentTarget.style.color = 'var(--dm-text-mid)')}
+          onMouseLeave={e => (e.currentTarget.style.color = 'var(--dm-text-lo)')}
         >
-          ← back
+          ←
         </Link>
 
         <span
-          className="h-2 w-2 rounded-full flex-shrink-0"
-          style={{ background: session.is_alive ? '#3fb950' : '#484f58' }}
+          className={session.is_alive ? 'dm-alive' : undefined}
+          style={{
+            width: '7px', height: '7px',
+            borderRadius: '50%',
+            flexShrink: 0,
+            background: session.is_alive ? 'var(--dm-accent)' : 'var(--dm-text-lo)',
+          }}
         />
-        <span className="text-white font-bold">{session.hostname}</span>
-        <span className="text-gray-400">
+
+        <span style={{ color: 'var(--dm-text-hi)', fontWeight: 700, fontSize: '0.84rem', flexShrink: 0 }}>
+          {session.hostname}
+        </span>
+
+        <span style={{ color: 'var(--dm-text-mid)', fontSize: '0.78rem', flexShrink: 0 }}>
           {session.username}{session.domain ? '@' + session.domain : ''}
         </span>
 
         {session.is_elevated && (
-          <span className="text-xs border border-red-900 rounded px-1" style={{ color: '#f85149' }}>
-            ELEVATED
+          <span className="dm-badge" style={{ color: 'var(--dm-red)', borderColor: 'rgba(255,58,76,0.35)' }}>
+            SYSTEM
           </span>
         )}
         {session.is_revoked && (
-          <span className="text-xs border border-orange-900 rounded px-1 text-orange-400">
+          <span className="dm-badge" style={{ color: 'var(--dm-amber)', borderColor: 'rgba(255,183,48,0.35)' }}>
             REVOKED
           </span>
         )}
 
-        <span className="text-gray-600 text-xs">{session.os} {session.arch} {session.os_version}</span>
-        <span className="text-gray-600 text-xs ml-auto">
-          {session.active_channel} · sleep {session.sleep_seconds}s ±{session.jitter_pct}%
+        <span style={{ color: 'var(--dm-text-lo)', fontSize: '0.7rem', flexShrink: 0 }}>
+          {session.os}&nbsp;{session.arch}&nbsp;{session.os_version}
+        </span>
+
+        <span style={{ color: 'var(--dm-text-lo)', fontSize: '0.7rem', marginLeft: 'auto', flexShrink: 0 }}>
+          {session.active_channel} · {session.sleep_seconds}s ±{session.jitter_pct}%
         </span>
 
         {!session.is_revoked && (
           <button
+            className="dm-action dm-danger"
+            style={{ fontSize: '0.68rem', letterSpacing: '0.06em' }}
             onClick={() => {
               if (confirm('Revoke this session? The agent will self-destruct on next check-in.')) {
                 revoke.mutate('operator-revoked')
               }
             }}
-            className="text-xs text-gray-600 hover:text-red-400 transition-colors ml-2"
           >
-            revoke
+            Revoke
           </button>
         )}
       </div>
 
       {/* EDR / AV warning */}
-      {detectionBar && (
-        <div className="px-4 py-1 border-b border-yellow-900 text-xs font-mono flex gap-4"
-             style={{ background: '#1a1200' }}>
+      {hasDetections && (
+        <div
+          className="flex items-center gap-4 px-4 py-1.5 flex-shrink-0"
+          style={{
+            background: 'var(--dm-amber-bg)',
+            borderBottom: '1px solid rgba(255,183,48,0.2)',
+            fontSize: '0.72rem',
+          }}
+        >
+          <span style={{ color: 'var(--dm-amber)', fontWeight: 600, letterSpacing: '0.08em', fontSize: '0.6rem' }}>
+            ⚠ DETECTION
+          </span>
           {session.edr_detected.length > 0 && (
-            <span className="text-yellow-400">EDR: {session.edr_detected.join(', ')}</span>
+            <span style={{ color: 'var(--dm-amber)' }}>
+              EDR: {session.edr_detected.join(', ')}
+            </span>
           )}
           {session.av_detected.length > 0 && (
-            <span className="text-yellow-400">AV: {session.av_detected.join(', ')}</span>
+            <span style={{ color: 'var(--dm-amber)' }}>
+              AV: {session.av_detected.join(', ')}
+            </span>
           )}
         </div>
       )}
@@ -117,7 +153,7 @@ export function SessionPage() {
       />
 
       {/* Terminal */}
-      <div className="flex-1 p-3 min-h-0">
+      <div className="flex-1 min-h-0 p-3">
         <SessionConsole sessionId={sessionId!} campaignId={campaignId} />
       </div>
     </div>

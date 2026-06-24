@@ -10,8 +10,8 @@ interface Props {
 }
 
 export function SessionConsole({ sessionId, campaignId: _campaignId }: Props) {
-  const containerRef = useRef<HTMLDivElement>(null)  // observed for size changes
-  const termRef      = useRef<HTMLDivElement>(null)  // xterm mount point (absolute)
+  const containerRef = useRef<HTMLDivElement>(null)
+  const termRef      = useRef<HTMLDivElement>(null)
   const term         = useRef<Terminal>()
   const fitAddon     = useRef<FitAddon>()
   const [input, setInput] = useState('')
@@ -22,17 +22,34 @@ export function SessionConsole({ sessionId, campaignId: _campaignId }: Props) {
 
     const t = new Terminal({
       theme: {
-        background: '#0d1117',
-        foreground: '#c9d1d9',
-        cursor:     '#58a6ff',
-        green:      '#3fb950',
-        red:        '#f85149',
-        yellow:     '#d29922',
+        background:   '#060a10',
+        foreground:   '#c4ddf0',
+        cursor:       '#00d4b0',
+        cursorAccent: '#060a10',
+        selectionBackground: 'rgba(0,212,176,0.2)',
+        black:   '#060a10',
+        red:     '#ff3a4c',
+        green:   '#00d4b0',
+        yellow:  '#ffb730',
+        blue:    '#4090ff',
+        magenta: '#9966ff',
+        cyan:    '#00b8a0',
+        white:   '#c4ddf0',
+        brightBlack:   '#2c4258',
+        brightRed:     '#ff6070',
+        brightGreen:   '#00e5c0',
+        brightYellow:  '#ffd060',
+        brightBlue:    '#60a8ff',
+        brightMagenta: '#b880ff',
+        brightCyan:    '#40d0b8',
+        brightWhite:   '#e8f4ff',
       },
-      fontFamily: '"JetBrains Mono", "Fira Code", monospace',
+      fontFamily: '"Cascadia Code", "JetBrains Mono", "Fira Code", Consolas, monospace',
       fontSize:   13,
-      cursorBlink: true,
-      convertEol:  true,
+      lineHeight: 1.4,
+      cursorBlink:  true,
+      convertEol:   true,
+      scrollback:   5000,
     })
 
     const fa = new FitAddon()
@@ -40,14 +57,13 @@ export function SessionConsole({ sessionId, campaignId: _campaignId }: Props) {
     t.open(termRef.current)
     fa.fit()
 
-    term.current    = t
+    term.current     = t
     fitAddon.current = fa
 
-    t.writeln('\x1b[32mDungeonMaster — Session Console\x1b[0m')
+    t.writeln('\x1b[36mDungeonMaster C2 — Interactive Shell\x1b[0m')
     t.writeln(`\x1b[90mSession: ${sessionId}\x1b[0m`)
     t.writeln('')
 
-    // Observe the wrapper (not the xterm div) so canvas resizes don't retrigger
     const obs = new ResizeObserver(() => requestAnimationFrame(() => fa.fit()))
     obs.observe(containerRef.current)
 
@@ -60,21 +76,16 @@ export function SessionConsole({ sessionId, campaignId: _campaignId }: Props) {
   async function sendCommand(cmd: string) {
     if (!cmd.trim() || busy) return
     setBusy(true)
-
-    term.current?.writeln(`\x1b[33m» ${cmd}\x1b[0m`)
-
+    term.current?.writeln(`\x1b[33m$ ${cmd}\x1b[0m`)
     try {
-      const { data } = await api.post(`/api/v1/tasks`, {
+      const { data } = await api.post('/api/v1/tasks', {
         session_id: sessionId,
         type:       'shell',
-        // Go's encoding/json decodes []byte fields from base64
         args:       btoa(JSON.stringify({ cmd })),
       })
-
-      // Poll for output (Phase 1 — simple polling)
       await pollTaskOutput(data.task_id)
-    } catch (err: any) {
-      term.current?.writeln(`\x1b[31mError: ${err.message}\x1b[0m`)
+    } catch (err: unknown) {
+      term.current?.writeln(`\x1b[31mError: ${(err as Error).message}\x1b[0m`)
     } finally {
       setBusy(false)
     }
@@ -86,10 +97,8 @@ export function SessionConsole({ sessionId, campaignId: _campaignId }: Props) {
       try {
         const { data } = await api.get(`/api/v1/tasks/${taskId}`)
         if (data.status === 'complete' || data.status === 'failed') {
-          const output = data.output
-            ? atob(data.output)
-            : '(no output)'
-          const color = data.status === 'complete' ? '' : '\x1b[31m'
+          const output = data.output ? atob(data.output) : '(no output)'
+          const color  = data.status === 'complete' ? '\x1b[0m' : '\x1b[31m'
           term.current?.writeln(`${color}${output}\x1b[0m`)
           return
         }
@@ -108,15 +117,23 @@ export function SessionConsole({ sessionId, campaignId: _campaignId }: Props) {
   }
 
   return (
-    <div className="flex flex-col h-full bg-[#0d1117] rounded-lg overflow-hidden border border-gray-700">
-      {/* Terminal output area — containerRef is observed; termRef is the absolute xterm mount */}
+    <div
+      className="flex flex-col h-full overflow-hidden"
+      style={{ background: '#060a10', border: '1px solid var(--dm-border)' }}
+    >
       <div ref={containerRef} className="flex-1 min-h-0 relative">
         <div ref={termRef} className="absolute inset-0 p-2" />
       </div>
 
-      {/* Command input */}
-      <div className="flex items-center border-t border-gray-700 px-3 py-2 gap-2">
-        <span className="text-green-400 font-mono text-sm select-none">$</span>
+      <div
+        className="flex items-center gap-2 flex-shrink-0"
+        style={{
+          borderTop: '1px solid var(--dm-border)',
+          padding: '0.4rem 0.75rem',
+          background: '#060a10',
+        }}
+      >
+        <span style={{ color: 'var(--dm-accent)', userSelect: 'none', fontSize: '0.82rem' }}>$</span>
         <input
           type="text"
           value={input}
@@ -124,12 +141,22 @@ export function SessionConsole({ sessionId, campaignId: _campaignId }: Props) {
           onKeyDown={handleKeyDown}
           disabled={busy}
           placeholder={busy ? 'waiting for output...' : 'enter command'}
-          className="flex-1 bg-transparent text-gray-200 font-mono text-sm outline-none placeholder-gray-600"
           autoComplete="off"
           spellCheck={false}
+          style={{
+            flex: 1,
+            background: 'transparent',
+            border: 'none',
+            outline: 'none',
+            color: 'var(--dm-text-hi)',
+            fontFamily: 'inherit',
+            fontSize: '0.82rem',
+          }}
         />
         {busy && (
-          <span className="text-yellow-400 text-xs animate-pulse">running</span>
+          <span style={{ color: 'var(--dm-amber)', fontSize: '0.65rem', letterSpacing: '0.12em', animation: 'dm-pulse 1.2s ease-in-out infinite' }}>
+            RUNNING
+          </span>
         )}
       </div>
     </div>
@@ -139,4 +166,3 @@ export function SessionConsole({ sessionId, campaignId: _campaignId }: Props) {
 function sleep(ms: number) {
   return new Promise(r => setTimeout(r, ms))
 }
-

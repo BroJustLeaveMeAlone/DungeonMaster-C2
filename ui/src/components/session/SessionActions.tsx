@@ -2,19 +2,18 @@ import { useRef, useState } from 'react'
 import { api } from '../../api/client'
 
 interface Props {
-  sessionId:   string
+  sessionId:    string
   sleepSeconds: number
-  jitterPct:   number
+  jitterPct:    number
   onSleepUpdated?: () => void
 }
 
 export function SessionActions({ sessionId, sleepSeconds, jitterPct, onSleepUpdated }: Props) {
-  const [busy, setBusy]           = useState<string | null>(null)
+  const [busy, setBusy]             = useState<string | null>(null)
   const [screenshot, setScreenshot] = useState<string | null>(null)
-  const [sleepVal, setSleepVal]   = useState(String(sleepSeconds))
-  const [jitterVal, setJitterVal] = useState(String(jitterPct))
-  const fileInputRef              = useRef<HTMLInputElement>(null)
-  const destPathRef               = useRef<string>('')
+  const [sleepVal, setSleepVal]     = useState(String(sleepSeconds))
+  const [jitterVal, setJitterVal]   = useState(String(jitterPct))
+  const fileInputRef                = useRef<HTMLInputElement>(null)
 
   async function queueTask(type: string, args: Record<string, unknown>) {
     const { data } = await api.post('/api/v1/tasks', {
@@ -35,7 +34,7 @@ export function SessionActions({ sessionId, sleepSeconds, jitterPct, onSleepUpda
           return Uint8Array.from(atob(data.output), c => c.charCodeAt(0))
         }
       } catch {
-        // swallow transient network errors and keep polling
+        // swallow transient errors and keep polling
       }
     }
     return null
@@ -47,11 +46,10 @@ export function SessionActions({ sessionId, sleepSeconds, jitterPct, onSleepUpda
       const taskId = await queueTask('screenshot', {})
       const bytes  = await pollOutput(taskId)
       if (!bytes) { alert('Screenshot failed or timed out.'); return }
-      const blob = new Blob([bytes], { type: 'image/bmp' })
-      const url  = URL.createObjectURL(blob)
-      setScreenshot(url)
-    } catch (e: any) {
-      alert(`Screenshot error: ${e.message}`)
+      const blob = new Blob([bytes.buffer as ArrayBuffer], { type: 'image/bmp' })
+      setScreenshot(URL.createObjectURL(blob))
+    } catch (e: unknown) {
+      alert(`Screenshot error: ${(e as Error).message}`)
     } finally {
       setBusy(null)
     }
@@ -62,19 +60,17 @@ export function SessionActions({ sessionId, sleepSeconds, jitterPct, onSleepUpda
     if (!path) return
     setBusy('download')
     try {
-      const taskId = await queueTask('upload', { path })
-      const bytes  = await pollOutput(taskId)
+      const taskId  = await queueTask('upload', { path })
+      const bytes   = await pollOutput(taskId)
       if (!bytes) { alert('Download failed or timed out.'); return }
       const filename = path.split(/[\\/]/).pop() || 'file'
-      const blob = new Blob([bytes])
+      const blob = new Blob([bytes.buffer as ArrayBuffer])
       const url  = URL.createObjectURL(blob)
       const a    = document.createElement('a')
-      a.href     = url
-      a.download = filename
-      a.click()
+      a.href = url; a.download = filename; a.click()
       URL.revokeObjectURL(url)
-    } catch (e: any) {
-      alert(`Download error: ${e.message}`)
+    } catch (e: unknown) {
+      alert(`Download error: ${(e as Error).message}`)
     } finally {
       setBusy(null)
     }
@@ -87,11 +83,11 @@ export function SessionActions({ sessionId, sleepSeconds, jitterPct, onSleepUpda
     try {
       const reader = new FileReader()
       const data   = await new Promise<string>((res, rej) => {
-        reader.onload  = () => {
+        reader.onload = () => {
           const result = reader.result
-          if (typeof result !== 'string') { rej(new Error('FileReader returned unexpected type')); return }
+          if (typeof result !== 'string') { rej(new Error('Unexpected FileReader result')); return }
           const b64 = result.split(',')[1]
-          if (!b64) { rej(new Error('FileReader produced no base64 data')); return }
+          if (!b64) { rej(new Error('No base64 data')); return }
           res(b64)
         }
         reader.onerror = rej
@@ -100,8 +96,8 @@ export function SessionActions({ sessionId, sleepSeconds, jitterPct, onSleepUpda
       const taskId = await queueTask('download', { path: dest, data })
       await pollOutput(taskId)
       alert(`Uploaded to ${dest}`)
-    } catch (e: any) {
-      alert(`Upload error: ${e.message}`)
+    } catch (e: unknown) {
+      alert(`Upload error: ${(e as Error).message}`)
     } finally {
       setBusy(null)
       if (fileInputRef.current) fileInputRef.current.value = ''
@@ -112,15 +108,15 @@ export function SessionActions({ sessionId, sleepSeconds, jitterPct, onSleepUpda
     const s = parseInt(sleepVal)
     const j = parseInt(jitterVal)
     if (isNaN(s) || s < 1 || isNaN(j) || j < 0 || j > 100) {
-      alert('Sleep: 1–86400 seconds, jitter: 0–100 %')
+      alert('Sleep: 1–86400 s, jitter: 0–100 %')
       return
     }
     setBusy('sleep')
     try {
       await api.patch(`/api/v1/sessions/${sessionId}/sleep`, { sleep_seconds: s, jitter_pct: j })
       onSleepUpdated?.()
-    } catch (e: any) {
-      alert(`Sleep update error: ${e.message}`)
+    } catch (e: unknown) {
+      alert(`Sleep update error: ${(e as Error).message}`)
     } finally {
       setBusy(null)
     }
@@ -131,44 +127,52 @@ export function SessionActions({ sessionId, sleepSeconds, jitterPct, onSleepUpda
     setBusy('kill')
     try {
       await queueTask('kill', {})
-    } catch (e: any) {
-      alert(`Kill error: ${e.message}`)
+    } catch (e: unknown) {
+      alert(`Kill error: ${(e as Error).message}`)
     } finally {
       setBusy(null)
     }
   }
 
+  const sep = (
+    <span style={{ color: 'var(--dm-border-hi)', userSelect: 'none', padding: '0 0.25rem' }}>│</span>
+  )
+
+  const inputNumCls: React.CSSProperties = {
+    background: 'var(--dm-bg)',
+    border: '1px solid var(--dm-border)',
+    color: 'var(--dm-text-hi)',
+    fontFamily: 'inherit',
+    fontSize: '0.72rem',
+    padding: '0.1rem 0.35rem',
+    outline: 'none',
+    textAlign: 'center',
+    borderRadius: 0,
+    width: '52px',
+  }
+
   return (
     <>
-      <div className="flex items-center gap-3 px-3 py-1.5 border-b border-gray-800 text-xs font-mono flex-wrap">
-
-        {/* Screenshot */}
+      <div
+        className="flex items-center gap-1.5 px-3 py-1.5 flex-wrap flex-shrink-0"
+        style={{ borderBottom: '1px solid var(--dm-border)', minHeight: '34px' }}
+      >
         <button
+          className="dm-action dm-go"
+          disabled={!!busy}
           onClick={takeScreenshot}
-          disabled={!!busy}
-          className="text-gray-400 hover:text-blue-400 disabled:opacity-40 transition-colors"
         >
-          {busy === 'screenshot' ? '⏳ screenshot…' : '📷 screenshot'}
+          {busy === 'screenshot' ? 'SCR…' : 'SCR'}
         </button>
 
-        <span className="text-gray-700">|</span>
+        {sep}
 
-        {/* File download (from target) */}
-        <button
-          onClick={downloadFile}
-          disabled={!!busy}
-          className="text-gray-400 hover:text-green-400 disabled:opacity-40 transition-colors"
-        >
-          {busy === 'download' ? '⏳ downloading…' : '↓ download file'}
+        <button className="dm-action dm-go" disabled={!!busy} onClick={downloadFile}>
+          {busy === 'download' ? '↓ DL…' : '↓ FILE'}
         </button>
 
-        {/* File upload (to target) */}
-        <button
-          onClick={() => fileInputRef.current?.click()}
-          disabled={!!busy}
-          className="text-gray-400 hover:text-green-400 disabled:opacity-40 transition-colors"
-        >
-          {busy === 'upload' ? '⏳ uploading…' : '↑ upload file'}
+        <button className="dm-action dm-go" disabled={!!busy} onClick={() => fileInputRef.current?.click()}>
+          {busy === 'upload' ? '↑ UL…' : '↑ FILE'}
         </button>
         <input
           ref={fileInputRef}
@@ -177,60 +181,60 @@ export function SessionActions({ sessionId, sleepSeconds, jitterPct, onSleepUpda
           onChange={e => { if (e.target.files?.[0]) uploadFile(e.target.files[0]) }}
         />
 
-        <span className="text-gray-700">|</span>
+        {sep}
 
-        {/* Sleep */}
-        <span className="text-gray-500">sleep</span>
+        <span style={{ color: 'var(--dm-text-lo)', fontSize: '0.68rem', letterSpacing: '0.08em' }}>SLEEP</span>
         <input
           type="number"
           value={sleepVal}
-          onChange={e => setSleepVal(e.target.value)}
           min={1} max={86400}
-          className="w-16 bg-gray-900 border border-gray-700 rounded px-1 text-gray-300 text-xs font-mono text-center focus:outline-none focus:border-gray-500"
+          onChange={e => setSleepVal(e.target.value)}
+          style={inputNumCls}
         />
-        <span className="text-gray-500">s ±</span>
+        <span style={{ color: 'var(--dm-text-lo)', fontSize: '0.68rem' }}>s ±</span>
         <input
           type="number"
           value={jitterVal}
-          onChange={e => setJitterVal(e.target.value)}
           min={0} max={100}
-          className="w-12 bg-gray-900 border border-gray-700 rounded px-1 text-gray-300 text-xs font-mono text-center focus:outline-none focus:border-gray-500"
+          onChange={e => setJitterVal(e.target.value)}
+          style={{ ...inputNumCls, width: '42px' }}
         />
-        <span className="text-gray-500">%</span>
-        <button
-          onClick={updateSleep}
-          disabled={!!busy}
-          className="text-gray-400 hover:text-yellow-400 disabled:opacity-40 transition-colors"
-        >
-          {busy === 'sleep' ? '⏳' : 'apply'}
+        <span style={{ color: 'var(--dm-text-lo)', fontSize: '0.68rem' }}>%</span>
+        <button className="dm-action dm-go" disabled={!!busy} onClick={updateSleep}>
+          {busy === 'sleep' ? 'SET…' : 'SET'}
         </button>
 
-        <span className="text-gray-700 ml-auto">|</span>
-
-        {/* Kill */}
-        <button
-          onClick={killAgent}
-          disabled={!!busy}
-          className="text-gray-600 hover:text-red-400 disabled:opacity-40 transition-colors"
-        >
-          {busy === 'kill' ? '⏳ killing…' : '✕ kill'}
-        </button>
+        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
+          {sep}
+          <button className="dm-action dm-danger" disabled={!!busy} onClick={killAgent}>
+            {busy === 'kill' ? 'KILL…' : 'KILL'}
+          </button>
+        </div>
       </div>
 
       {/* Screenshot modal */}
       {screenshot && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80"
+          className="fixed inset-0 z-50 flex items-center justify-center"
+          style={{ background: 'rgba(0,0,0,0.88)' }}
           onClick={() => { URL.revokeObjectURL(screenshot); setScreenshot(null) }}
         >
-          <div className="relative max-w-[90vw] max-h-[90vh]" onClick={e => e.stopPropagation()}>
-            <img src={screenshot} alt="screenshot" className="max-w-full max-h-[85vh] rounded border border-gray-700 shadow-2xl" />
-            <div className="flex justify-between items-center mt-2 text-xs font-mono text-gray-500">
+          <div
+            className="relative"
+            style={{ maxWidth: '90vw', maxHeight: '90vh' }}
+            onClick={e => e.stopPropagation()}
+          >
+            <img
+              src={screenshot}
+              alt="screenshot"
+              style={{ maxWidth: '100%', maxHeight: '85vh', display: 'block', border: '1px solid var(--dm-border-hi)' }}
+            />
+            <div className="flex justify-between items-center mt-2" style={{ fontSize: '0.7rem', color: 'var(--dm-text-lo)' }}>
               <span>click outside to close</span>
               <a
                 href={screenshot}
                 download="screenshot.bmp"
-                className="text-blue-400 hover:text-blue-300"
+                style={{ color: 'var(--dm-blue)', textDecoration: 'none' }}
                 onClick={e => e.stopPropagation()}
               >
                 ↓ save

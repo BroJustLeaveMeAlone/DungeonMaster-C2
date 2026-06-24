@@ -2,12 +2,203 @@
 @tailwind components;
 @tailwind utilities;
 
-@layer base {
-  body {
-    @apply bg-gray-950 text-gray-100 antialiased;
-    background-color: #0d1117;
-  }
-  * {
-    box-sizing: border-box;
-  }
+:root {
+  --dm-bg:        #060a10;
+  --dm-surface:   #0b1221;
+  --dm-raised:    #0e1928;
+  --dm-border:    #18283a;
+  --dm-border-hi: #264060;
+  --dm-accent:    #00d4b0;
+  --dm-accent-lo: #00806a;
+  --dm-accent-bg: rgba(0, 212, 176, 0.06);
+  --dm-red:       #ff3a4c;
+  --dm-red-bg:    rgba(255, 58, 76, 0.10);
+  --dm-amber:     #ffb730;
+  --dm-amber-bg:  rgba(255, 183, 48, 0.09);
+  --dm-blue:      #4090ff;
+  --dm-purple:    #9966ff;
+  --dm-text-hi:   #c4ddf0;
+  --dm-text-mid:  #567290;
+  --dm-text-lo:   #2c4258;
+  --dm-text-dim:  #12202e;
 }
+
+@layer base {
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body, #root { height: 100%; }
+
+  body {
+    background: var(--dm-bg);
+    color: var(--dm-text-hi);
+    font-family: 'Cascadia Code', 'JetBrains Mono', 'Fira Code', Consolas, 'Courier New', monospace;
+    -webkit-font-smoothing: antialiased;
+    font-size: 13px;
+    line-height: 1.5;
+  }
+
+  /* Subtle scanline overlay */
+  body::after {
+    content: '';
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 9998;
+    background: repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent 3px,
+      rgba(0, 0, 0, 0.018) 3px,
+      rgba(0, 0, 0, 0.018) 4px
+    );
+  }
+
+  ::-webkit-scrollbar       { width: 3px; height: 3px; }
+  ::-webkit-scrollbar-track { background: var(--dm-bg); }
+  ::-webkit-scrollbar-thumb { background: var(--dm-border-hi); }
+}
+
+/* ── Dot-grid page background ─────────────────────────────── */
+.dm-grid-bg {
+  background-image: radial-gradient(var(--dm-border) 1px, transparent 1px);
+  background-size: 22px 22px;
+}
+
+/* ── Section heading: ▸ TITLE ─────────────────────────────── */
+.dm-section {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.6rem;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--dm-text-lo);
+}
+.dm-section::before { content: '▸'; color: var(--dm-accent-lo); flex-shrink: 0; }
+.dm-section::after  { content: ''; flex: 1; height: 1px; background: var(--dm-border); }
+
+/* ── Panels ───────────────────────────────────────────────── */
+.dm-panel {
+  background: var(--dm-surface);
+  border: 1px solid var(--dm-border);
+}
+
+/* Clickable card with left-accent on hover */
+.dm-card {
+  display: block;
+  background: var(--dm-surface);
+  border: 1px solid var(--dm-border);
+  border-left: 2px solid var(--dm-border);
+  text-decoration: none;
+  transition: border-color 0.12s, border-left-color 0.12s;
+}
+.dm-card:hover {
+  border-color: var(--dm-border-hi);
+  border-left-color: var(--dm-accent-lo);
+}
+
+/* ── Form primitives ──────────────────────────────────────── */
+.dm-label {
+  display: block;
+  font-size: 0.6rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--dm-text-lo);
+  margin-bottom: 0.3rem;
+}
+
+.dm-input {
+  width: 100%;
+  background: var(--dm-bg);
+  border: 1px solid var(--dm-border);
+  color: var(--dm-text-hi);
+  font-family: inherit;
+  font-size: 0.8rem;
+  padding: 0.45rem 0.65rem;
+  outline: none;
+  border-radius: 0;
+  transition: border-color 0.12s;
+}
+.dm-input:focus           { border-color: var(--dm-accent-lo); }
+.dm-input::placeholder    { color: var(--dm-text-lo); }
+.dm-input[type='number']  { -moz-appearance: textfield; }
+.dm-input[type='number']::-webkit-inner-spin-button,
+.dm-input[type='number']::-webkit-outer-spin-button { -webkit-appearance: none; }
+
+.dm-select {
+  width: 100%;
+  background: var(--dm-bg);
+  border: 1px solid var(--dm-border);
+  color: var(--dm-text-hi);
+  font-family: inherit;
+  font-size: 0.8rem;
+  padding: 0.45rem 1.8rem 0.45rem 0.65rem;
+  outline: none;
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23567290'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.65rem center;
+  background-size: 8px 5px;
+  cursor: pointer;
+  border-radius: 0;
+  transition: border-color 0.12s;
+}
+.dm-select:focus  { border-color: var(--dm-accent-lo); }
+.dm-select option { background: var(--dm-raised); }
+
+/* ── Buttons ──────────────────────────────────────────────── */
+.dm-btn {
+  display: block;
+  width: 100%;
+  padding: 0.55rem;
+  background: var(--dm-accent-lo);
+  color: #020e09;
+  font-family: inherit;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  border: none;
+  cursor: pointer;
+  border-radius: 0;
+  transition: background 0.12s;
+}
+.dm-btn:hover:not(:disabled) { background: var(--dm-accent); }
+.dm-btn:disabled              { opacity: 0.28; cursor: default; }
+
+.dm-action {
+  font-family: inherit;
+  font-size: 0.7rem;
+  letter-spacing: 0.04em;
+  color: var(--dm-text-mid);
+  background: none;
+  border: none;
+  padding: 0 0.15rem;
+  cursor: pointer;
+  border-radius: 0;
+  transition: color 0.1s;
+  white-space: nowrap;
+}
+.dm-action:hover:not(:disabled) { color: var(--dm-text-hi); }
+.dm-action.dm-danger:hover      { color: var(--dm-red); }
+.dm-action.dm-go:hover          { color: var(--dm-accent); }
+.dm-action:disabled             { opacity: 0.28; cursor: default; }
+
+/* ── Badges ───────────────────────────────────────────────── */
+.dm-badge {
+  display: inline-flex;
+  align-items: center;
+  font-size: 0.58rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 0.1rem 0.4rem;
+  border: 1px solid;
+  flex-shrink: 0;
+}
+
+/* ── Alive pulse ──────────────────────────────────────────── */
+@keyframes dm-pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.2; }
+}
+.dm-alive { animation: dm-pulse 2.4s ease-in-out infinite; }
