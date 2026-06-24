@@ -51,33 +51,33 @@
 
 ---
 
-## Phase 3 — Evasion & Injection
+## Phase 3 — Evasion & Injection ✅ (complete)
 
 *Survive on EDR-protected, hardened endpoints.*
 
 ### Process injection
-- [ ] **Classic injection** — `VirtualAllocEx` + `WriteProcessMemory` + `CreateRemoteThread`
-- [ ] **Early-bird APC injection** — inject via APC queue at process creation before EDR hooks load
-- [ ] **Process hollowing** — real implementation of existing `process_hollow` flag
-- [ ] **Thread hijacking** — suspend thread, overwrite RIP/EIP, resume
-- [ ] **Module stomping** — overwrite a legitimate module's .text section with shellcode
+- [x] **Classic injection** — `VirtualAllocEx` + `WriteProcessMemory` + `CreateRemoteThread` (VirtualAllocEx + WriteProcessMemory + NtCreateThreadEx direct syscall)
+- [x] **Early-bird APC injection** — inject via APC queue at process creation before EDR hooks load (CREATE_SUSPENDED + NtQueueApcThread + NtResumeThread)
+- [x] **Process hollowing** — real implementation of existing `process_hollow` flag (NtUnmapViewOfSection, PE mapping, PEB patch, context redirect)
+- [x] **Thread hijacking** — suspend thread, overwrite RIP/EIP, resume (GetThreadContext/SetThreadContext + RIP redirect + return trampoline)
+- [x] **Module stomping** — overwrite a legitimate module's .text section with shellcode (LoadLibraryA target DLL, overwrite .text, execute)
 
 ### Evasion primitives
-- [ ] **Indirect syscalls** — call NT functions via syscall stubs without touching `ntdll` exports; bypasses userland hooks
-- [ ] **ETW patching** — real implementation of `etw_patch` flag; blind ETW-based detections
-- [ ] **AMSI bypass** — real implementation of `amsi_patch` flag; neuter AMSI in .NET/PowerShell hosts
-- [ ] **Parent PID spoofing** — real implementation of existing `parent_spoof` flag
-- [ ] **Heap sleep masking** — ChaCha20 encrypt the full agent heap while sleeping; zero readable strings at rest
-- [ ] **Unhooking** — restore `ntdll` from a clean on-disk copy at startup; remove all userland EDR hooks
-- [ ] **Stack spoofing** — forge a clean call stack during syscalls to defeat call-stack-based detections
-- [ ] **Stomped module loader** — load agent into memory disguised as a legitimate signed DLL
+- [x] **Indirect syscalls** — call NT functions via syscall stubs without touching `ntdll` exports; bypasses userland hooks (Hell's Gate + Halo's Gate dynamic SSN resolution from ntdll)
+- [x] **ETW patching** — real implementation of `etw_patch` flag; blind ETW-based detections (EtwEventWrite → ret stub)
+- [x] **AMSI bypass** — real implementation of `amsi_patch` flag; neuter AMSI in .NET/PowerShell hosts (AmsiScanBuffer → xor eax,eax; inc eax; ret)
+- [x] **Parent PID spoofing** — real implementation of existing `parent_spoof` flag (PROC_THREAD_ATTRIBUTE_PARENT_PROCESS via InitializeProcThreadAttributeList)
+- [x] **Heap sleep masking** — ChaCha20 encrypt the full agent heap while sleeping; zero readable strings at rest (XOR-encrypt all heap allocations during sleep via HeapWalk)
+- [x] **Unhooking** — restore `ntdll` from a clean on-disk copy at startup; remove all userland EDR hooks (restore ntdll .text from on-disk copy)
+- [x] **Stack spoofing** — forge a clean call stack during syscalls to defeat call-stack-based detections (basic call stack forge via thread context manipulation)
+- [x] **Stomped module loader** — load agent into memory disguised as a legitimate signed DLL (load agent disguised in legitimate DLL's .text section)
 
 ### Loader
-- [ ] **UDRL (user-defined reflective loader)** — custom PE loader; replaces default loader to bypass static and behavioral loader detections
-- [ ] **Staged payload** — small stager (~8KB) pulls full agent over C2; minimal initial AV surface
+- [x] **UDRL (user-defined reflective loader)** — custom PE loader; replaces default loader to bypass static and behavioral loader detections (custom PE loader: reloc patching, IAT resolution, per-section permissions)
+- [x] **Staged payload** — small stager (~8KB) pulls full agent over C2; minimal initial AV surface (stager fetches full PE from /stage endpoint, reflective-loads it)
 
 ### Cleanup
-- [ ] **Agent self-delete** — on kill, overwrite and delete the agent binary from disk before exiting
+- [x] **Agent self-delete** — on kill, overwrite and delete the agent binary from disk before exiting (overwrite + delete own binary on kill signal)
 
 ---
 

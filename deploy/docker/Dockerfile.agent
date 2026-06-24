@@ -25,6 +25,7 @@ ARG DM_TLS_SKIP_VERIFY=false
 ARG DM_NO_EVASION=false
 ARG DM_UA=
 ARG DM_SLEEP_ENCRYPT=false
+ARG DM_FEATURES=
 ARG DM_SMB_HOST=
 ARG DM_SMB_PIPE=
 
@@ -42,10 +43,15 @@ ENV DM_TARGET=$DM_TARGET \
     DM_NO_EVASION=$DM_NO_EVASION \
     DM_UA=$DM_UA \
     DM_SLEEP_ENCRYPT=$DM_SLEEP_ENCRYPT \
+    DM_FEATURES=$DM_FEATURES \
     DM_SMB_HOST=$DM_SMB_HOST \
     DM_SMB_PIPE=$DM_SMB_PIPE
 
-RUN cargo build --release --target $DM_TARGET
+RUN if [ -n "$DM_FEATURES" ]; then \
+        cargo build --release --target $DM_TARGET --features "$DM_FEATURES"; \
+    else \
+        cargo build --release --target $DM_TARGET; \
+    fi
 
 FROM alpine:3.20
 ARG DM_TARGET=x86_64-pc-windows-gnu

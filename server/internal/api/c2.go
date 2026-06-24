@@ -47,6 +47,7 @@ func NewC2Server(sessions *session.Manager, bus *collab.Bus, log *zap.Logger) *h
 	pollPath := envOrC2("DM_C2_PATH_POLL", "/c")
 	s.mux.HandleFunc(regPath, s.handleRegister)
 	s.mux.HandleFunc(pollPath, s.handleCallback)
+	s.mux.HandleFunc("/stage/", s.handleStage)
 
 	return &http.Server{
 		Handler: s.mux,

