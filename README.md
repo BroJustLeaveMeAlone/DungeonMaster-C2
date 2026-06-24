@@ -167,13 +167,13 @@ A raw TCP C2 listener is also available when `DM_TCP_C2_ADDR` is set. Same lengt
 
 ## Roadmap
 
-DungeonMaster is developed in five phases. **Phase 1 (foundation) is complete.** See [ROADMAP.md](ROADMAP.md) for the full checklist — every planned module, evasion primitive, and capability is listed with its target phase.
+DungeonMaster is developed in five phases. **Phases 1–3 are complete.** See [ROADMAP.md](ROADMAP.md) for the full checklist — every planned module, evasion primitive, and capability is listed with its target phase.
 
 | Phase | Name | Status |
 |-------|------|--------|
 | 1 | Foundation — server, agent, UI, Docker build system | ✅ Complete |
 | 2 | Operational Core — file ops, SMB/TCP channels, malleable C2, TOTP enforcement | ✅ Complete |
-| 3 | Evasion & Injection — process injection, indirect syscalls, unhooking, UDRL | 🔲 Planned |
+| 3 | Evasion & Injection — process injection, indirect syscalls, unhooking, UDRL | ✅ Complete |
 | 4 | Post-Exploitation Module Library — creds, AD/Kerberos, lateral movement, cloud, Linux/macOS | 🔲 Planned |
 | 5 | Beyond Cobalt Strike — AI co-pilot, BOF loader, kill chain templates, MITRE heatmap, collaboration | 🔲 Planned |
 
@@ -181,4 +181,4 @@ DungeonMaster is developed in five phases. **Phase 1 (foundation) is complete.**
 
 ## License
 
-GPL-3.0 — see [LICENSE](LICENSE). Free to use, modify, and distribute; derivative works must remain open-source under the same terms.
+Proprietary — all rights reserved. See [LICENSE](LICENSE).

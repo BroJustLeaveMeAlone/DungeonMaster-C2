@@ -1,6 +1,8 @@
 # DungeonMaster C2 — Roadmap
 
 > Checkbox list — checked items are shipped. Phases are sequential; a phase begins when the previous one is feature-complete.
+>
+> **Current status: Phases 1–3 complete. Phase 4 in planning.**
 
 ---
 
