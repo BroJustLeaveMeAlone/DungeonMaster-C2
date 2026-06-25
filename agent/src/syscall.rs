@@ -449,14 +449,17 @@ pub unsafe fn nt_alloc(
     alloc_type: u32,
     protect: u32,
 ) -> i32 {
+    #[cfg(all(target_arch = "x86_64", feature = "stack-spoof"))]
+    { return dm_syscall_spoofed(
+        SSN_NT_ALLOCATE_VIRTUAL_MEMORY,
+        process as u64, base as u64, zero_bits as u64,
+        size as u64, alloc_type as u64, protect as u64,
+    ); }
+    #[cfg(not(all(target_arch = "x86_64", feature = "stack-spoof")))]
     dm_syscall(
         SSN_NT_ALLOCATE_VIRTUAL_MEMORY,
-        process as u64,
-        base as u64,
-        zero_bits as u64,
-        size as u64,
-        alloc_type as u64,
-        protect as u64,
+        process as u64, base as u64, zero_bits as u64,
+        size as u64, alloc_type as u64, protect as u64,
     )
 }
 
@@ -484,14 +487,17 @@ pub unsafe fn nt_protect(
     new_prot: u32,
     old_prot: *mut u32,
 ) -> i32 {
+    #[cfg(all(target_arch = "x86_64", feature = "stack-spoof"))]
+    { return dm_syscall_spoofed(
+        SSN_NT_PROTECT_VIRTUAL_MEMORY,
+        process as u64, base as u64, size as u64,
+        new_prot as u64, old_prot as u64, 0,
+    ); }
+    #[cfg(not(all(target_arch = "x86_64", feature = "stack-spoof")))]
     dm_syscall(
         SSN_NT_PROTECT_VIRTUAL_MEMORY,
-        process as u64,
-        base as u64,
-        size as u64,
-        new_prot as u64,
-        old_prot as u64,
-        0,
+        process as u64, base as u64, size as u64,
+        new_prot as u64, old_prot as u64, 0,
     )
 }
 

