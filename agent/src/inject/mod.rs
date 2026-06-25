@@ -18,6 +18,8 @@ pub use apc::inject_apc;
 #[cfg(target_os = "windows")]
 pub use hollow::inject_hollow;
 #[cfg(target_os = "windows")]
+pub use hollow::hollow_into_process;
+#[cfg(target_os = "windows")]
 pub use hijack::inject_hijack;
 #[cfg(target_os = "windows")]
 pub use stomp::inject_stomp;

@@ -5,7 +5,7 @@ use windows_sys::Win32::{
     Foundation::{CloseHandle, FALSE},
     System::{
         Diagnostics::{
-            Debug::{GetThreadContext, SetThreadContext, CONTEXT, CONTEXT_FULL_AMD64},
+            Debug::{GetThreadContext, SetThreadContext, CONTEXT},
             ToolHelp::{
                 CreateToolhelp32Snapshot, Thread32First, Thread32Next, THREADENTRY32,
                 TH32CS_SNAPTHREAD,
@@ -17,6 +17,10 @@ use windows_sys::Win32::{
         },
     },
 };
+
+// CONTEXT_CONTROL | CONTEXT_INTEGER | CONTEXT_FLOATING_POINT for AMD64
+// windows-sys 0.52 does not export this as a named constant
+const CONTEXT_FULL_AMD64: u32 = 0x0010_000B;
 
 const MEM_COMMIT: u32 = 0x1000;
 const MEM_RESERVE: u32 = 0x2000;

