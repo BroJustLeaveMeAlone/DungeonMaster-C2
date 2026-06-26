@@ -29,8 +29,6 @@ sleep-encrypt = []
 # Evasion features — enabled by the build service per engagement
 process-hollow = []
 parent-spoof   = []
-etw-patch      = []
-amsi-patch     = []
 
 # Phase 3 injection techniques
 inject-classic = []
