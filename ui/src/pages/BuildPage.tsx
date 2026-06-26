@@ -39,8 +39,6 @@ const FEATURE_GROUPS: { label: string; features: [string, string][] }[] = [
     label: 'Evasion',
     features: [
       ['ppid-spoof',   'PPID spoofing'],
-      ['etw-patch',    'ETW patching'],
-      ['amsi-patch',   'AMSI bypass'],
       ['unhook',       'ntdll unhooking'],
       ['heap-encrypt', 'Heap sleep masking'],
       ['stack-spoof',  'Stack spoofing'],
@@ -50,6 +48,7 @@ const FEATURE_GROUPS: { label: string; features: [string, string][] }[] = [
     label: 'Loader / Lifecycle',
     features: [
       ['udrl',           'Reflective loader (UDRL)'],
+      ['process-hollow', 'Hollow into trusted process (requires udrl)'],
       ['staged-payload', 'Staged payload (requires udrl)'],
       ['self-delete',    'Agent self-delete on cleanup'],
     ],
