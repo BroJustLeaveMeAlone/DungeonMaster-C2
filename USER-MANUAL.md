@@ -476,7 +476,6 @@ The console does not support interactive commands (SSH, PowerShell remoting, etc
 | Sleep (sec) | 1–3600 | Default 30. Sets the base polling interval. |
 | Jitter (%) | 0–50 | Default 20. Applied as ± random offset on each sleep. |
 | Process Hollowing | checkbox | Feature flag `process-hollow` — stub only, not yet implemented. |
-| Parent PID Spoofing | checkbox | Feature flag `parent-spoof` — stub only. |
 | ETW Patch | checkbox | Feature flag `etw-patch` — stub only. |
 | AMSI Patch | checkbox | Feature flag `amsi-patch` — stub only. |
 | Ephemeral | checkbox (default on) | No persistence installed — agent runs in-memory only. |
@@ -528,7 +527,6 @@ These are defined in `agent/Cargo.toml` and control optional post-exploitation c
 | Feature | Status | Description |
 |---|---|---|
 | `process-hollow` | Stub | Replace a legitimate process image with agent code at launch |
-| `parent-spoof` | Stub | Reparent the agent process to a legitimate parent (e.g., Explorer) |
 | `etw-patch` | Stub | Patch ETW provider in-memory to suppress telemetry |
 | `amsi-patch` | Stub | Patch AMSI in the current process to bypass PowerShell script scanning |
 | `channel-https` | Implemented | Default HTTPS callback channel |
@@ -889,7 +887,6 @@ The following features are planned but not yet implemented. Stubs exist in the c
 | BOF / PIC loader (`module` task) | Load and run Beacon Object Files or position-independent shellcode in-process. |
 | Process injection (`inject` task) | Inject into a remote process. |
 | Process hollowing | Cargo feature `process-hollow` — launch a legitimate process and replace its image. |
-| Parent PID spoofing | Cargo feature `parent-spoof` — reparent the agent to blend with normal process trees. |
 | ETW patching | Cargo feature `etw-patch` — suppress ETW telemetry in-process. |
 | AMSI patching | Cargo feature `amsi-patch` — bypass AMSI in the current process. |
 

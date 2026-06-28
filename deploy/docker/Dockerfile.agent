@@ -78,6 +78,8 @@ RUN --mount=type=cache,id=dm-cargo-registry,target=/root/.cargo/registry \
     --mount=type=cache,id=dm-cargo-git,target=/root/.cargo/git \
     --mount=type=cache,id=dm-cargo-target,target=/build/target,sharing=locked \
     if [ "$DM_DLL_BUILD" = "true" ]; then \
+        printf '#include<windows.h>\nextern DWORD WINAPI GetFileVersionInfoSizeW(LPCWSTR,LPDWORD);\nint WINAPI WinMain(HINSTANCE h,HINSTANCE p,LPSTR c,int n){DWORD d=0;GetFileVersionInfoSizeW(L"",&d);SleepEx(INFINITE,TRUE);return 0;}' > /tmp/host.c && \
+        x86_64-w64-mingw32-gcc -mwindows -s -O2 -o /output/sideload-host.exe /tmp/host.c -lversion && \
         cargo build --release --lib --target $DM_TARGET --features "$DM_FEATURES" && \
         cargo build --release --bin dm-dropper --target $DM_TARGET --no-default-features && \
         cp /build/target/${DM_TARGET}/release/dm_agent_dll.dll /output/version.dll && \
