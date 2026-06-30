@@ -34,6 +34,7 @@ func NewHTTPGateway(grpcAddr string, sessions *session.Manager, bus *collab.Bus,
 	// Public — no auth required
 	mux.HandleFunc("POST /api/v1/auth/login", g.handleLogin)
 	mux.HandleFunc("POST /api/v1/auth/refresh", g.handleRefresh)
+	mux.HandleFunc("GET /download/", g.handleHTTPDownload)
 
 	// Protected — all routes require a valid access JWT
 	protected := http.NewServeMux()
@@ -52,9 +53,10 @@ func NewHTTPGateway(grpcAddr string, sessions *session.Manager, bus *collab.Bus,
 	protected.HandleFunc("GET /api/v1/events", g.handleEvents) // SSE stream
 	protected.HandleFunc("GET /api/v1/listeners",     g.handleListListeners)
 	protected.HandleFunc("POST /api/v1/listeners",    g.handleCreateListener)
-	protected.HandleFunc("GET /api/v1/builds",        g.handleListBuilds)
-	protected.HandleFunc("POST /api/v1/builds",       g.handleCreateBuild)
-	protected.HandleFunc("GET /api/v1/builds/{id}",   g.handleGetBuild)
+	protected.HandleFunc("GET /api/v1/builds",              g.handleListBuilds)
+	protected.HandleFunc("POST /api/v1/builds",             g.handleCreateBuild)
+	protected.HandleFunc("GET /api/v1/builds/{id}",         g.handleGetBuild)
+	protected.HandleFunc("GET /api/v1/builds/{id}/deliver", g.handleDeliverBuild)
 	protected.HandleFunc("GET /api/v1/profiles",          g.handleListProfiles)
 	protected.HandleFunc("POST /api/v1/profiles",         g.handleCreateProfile)
 	protected.HandleFunc("GET /api/v1/profiles/{name}",   g.handleGetProfile)

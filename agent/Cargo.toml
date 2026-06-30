@@ -12,13 +12,6 @@ name = "dm_agent_dll"
 path = "src/dll_main.rs"
 crate-type = ["cdylib"]
 
-# Packer stub: a minimal decryptor that embeds the encrypted stager and UDRL-loads it.
-# Build with: DM_STAGER_PATH=/path/to/stager.exe cargo build --release \
-#             --bin dm-stub --features "udrl,packer-stub" --target x86_64-pc-windows-gnu
-[[bin]]
-name = "dm-stub"
-path = "src/stub_main.rs"
-
 [[bin]]
 name = "dm-dropper"
 path = "src/dropper_main.rs"
@@ -49,10 +42,8 @@ ppid-spoof     = []
 heap-encrypt   = []
 stack-spoof    = []
 udrl           = []
-staged-payload = []
 self-delete    = []
 dll-sideload   = []
-packer-stub    = ["udrl"]
 
 [dependencies]
 # Crypto

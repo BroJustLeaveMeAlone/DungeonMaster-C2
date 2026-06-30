@@ -143,6 +143,7 @@ pub const HASH_NT_QUERY_INFORMATION_PROCESS: u32 = fnv1a(b"NtQueryInformationPro
 pub const HASH_NT_CLOSE: u32 = fnv1a(b"NtClose");
 pub const HASH_NT_CREATE_SECTION: u32 = fnv1a(b"NtCreateSection");
 pub const HASH_NT_MAP_VIEW_OF_SECTION: u32 = fnv1a(b"NtMapViewOfSection");
+pub const HASH_NT_OPEN_SECTION: u32 = fnv1a(b"NtOpenSection");
 
 pub static mut SSN_NT_ALLOCATE_VIRTUAL_MEMORY: u32 = 0;
 pub static mut SSN_NT_FREE_VIRTUAL_MEMORY: u32 = 0;
@@ -163,6 +164,7 @@ pub static mut SSN_NT_CLOSE: u32 = 0;
 pub static mut SSN_NT_CREATE_SECTION: u32 = 0;
 #[no_mangle]
 pub static mut SSN_NT_MAP_VIEW_OF_SECTION: u32 = 0;
+pub static mut SSN_NT_OPEN_SECTION: u32 = 0;
 
 /// NtQueryInformationProcess(ProcessBasicInformation) result — ProcessBasicInformation (class 0).
 /// Layout is stable across all NT 6.x+ versions.
@@ -289,6 +291,10 @@ pub fn init() -> bool {
         resolve!(HASH_NT_CLOSE,                       SSN_NT_CLOSE);
         resolve!(HASH_NT_CREATE_SECTION,              SSN_NT_CREATE_SECTION);
         resolve!(HASH_NT_MAP_VIEW_OF_SECTION,         SSN_NT_MAP_VIEW_OF_SECTION);
+        // Non-fatal: NtOpenSection is only needed when the unhook feature is active.
+        if let Some(s) = resolve_ssn(HASH_NT_OPEN_SECTION) {
+            SSN_NT_OPEN_SECTION = s;
+        }
     }
     true
 }
@@ -717,6 +723,22 @@ pub unsafe fn nt_create_section(
         page_prot,
         alloc_attrs,
         0,
+    )
+}
+
+/// NtOpenSection — open an existing section object by NT object path.
+/// `oa` must point to a valid OBJECT_ATTRIBUTES with a UNICODE_STRING name.
+pub unsafe fn nt_open_section(
+    handle: *mut isize,
+    access: u32,
+    oa:     *const u8,
+) -> i32 {
+    dm_syscall(
+        SSN_NT_OPEN_SECTION,
+        handle as u64,
+        access as u64,
+        oa     as u64,
+        0, 0, 0,
     )
 }
 

