@@ -124,9 +124,11 @@ RUN --mount=type=cache,id=dm-cargo-registry,target=/root/.cargo/registry \
     if [ "$DM_PACK_STAGER" = "true" ]; then \
         STAGER=/build/target/${DM_TARGET}/release/dm-agent.exe && \
         python3 /deploy/pe_patch.py "$STAGER" --inplace && \
-        DM_STAGER_PATH="$STAGER" \
+        python3 /deploy/pe_patch.py "$STAGER" --pack-out /tmp/dm-stager.packed && \
+        DM_STAGER_PATH=/tmp/dm-stager.packed \
         cargo build --release --bin dm-stub --target $DM_TARGET \
-            --no-default-features --features "packer-stub" && \
+            --no-default-features --features "packer-stub" \
+            2>&1 && \
         cp /build/target/${DM_TARGET}/release/dm-stub.exe /output/dm-stub.exe && \
         python3 /deploy/pe_patch.py /output/dm-stub.exe --inplace && \
         if [ -n "$DM_SIGN_SUBJECT" ]; then \

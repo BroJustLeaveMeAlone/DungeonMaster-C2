@@ -467,9 +467,24 @@ fn write_pipe(h: windows_sys::Win32::Foundation::HANDLE, data: &[u8]) -> bool {
     }
 }
 
-// Minimal synchronous HTTP POST/GET using ureq (already a dep via the https channel)
-#[cfg(target_os = "windows")]
+#[cfg(all(target_os = "windows", feature = "channel-winhttp"))]
 fn forward_http(url: &str, method: &str, body: &[u8]) -> Result<Vec<u8>, String> {
+    let rest = url.strip_prefix("https://").ok_or("not https url")?;
+    let (host_port, path) = if let Some(idx) = rest.find('/') {
+        (&rest[..idx], format!("/{}", &rest[idx + 1..]))
+    } else {
+        (rest, "/".to_string())
+    };
+    let (host, port_str) = host_port.split_once(':').unwrap_or((host_port, "443"));
+    let ch = crate::channel::winhttp::WinHttpChannel::new(host, port_str);
+    let hdrs = if method != "GET" { Some("Content-Type: application/octet-stream\r\n") } else { None };
+    let body_opt = if body.is_empty() { None } else { Some(body) };
+    ch.request(method, &path, hdrs, body_opt).map_err(|e| e.to_string())
+}
+
+#[cfg(all(target_os = "windows", feature = "channel-https", not(feature = "channel-winhttp")))]
+fn forward_http(url: &str, method: &str, body: &[u8]) -> Result<Vec<u8>, String> {
+    use std::io::Read;
     let mut builder = ureq::AgentBuilder::new()
         .timeout(std::time::Duration::from_secs(30));
     if crate::channel::https::TLS_SKIP_VERIFY {

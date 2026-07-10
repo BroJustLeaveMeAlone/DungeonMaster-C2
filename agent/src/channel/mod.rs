@@ -1,4 +1,7 @@
+#[cfg(feature = "channel-https")]
 pub mod https;
+#[cfg(all(feature = "channel-winhttp", target_os = "windows"))]
+pub mod winhttp;
 #[cfg(feature = "channel-tcp")]
 pub mod tcp;
 #[cfg(all(feature = "channel-smb", target_os = "windows"))]

@@ -187,7 +187,7 @@ func (m *Manager) PendingTasks(ctx context.Context, sessionID string) ([]Task, e
 			ORDER BY created_at ASC
 			LIMIT 10
 		)
-		RETURNING id, type, args, mitre_technique_id`,
+		RETURNING id, type, args, COALESCE(mitre_technique_id, '')`,
 		sessionID,
 	)
 	if err != nil {

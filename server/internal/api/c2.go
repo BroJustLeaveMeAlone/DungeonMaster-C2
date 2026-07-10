@@ -57,7 +57,7 @@ func NewC2Server(sessions *session.Manager, bus *collab.Bus, log *zap.Logger) *h
 	return &http.Server{
 		Handler: logged,
 		TLSConfig: &tls.Config{
-			MinVersion: tls.VersionTLS13,
+			MinVersion: tls.VersionTLS12,
 		},
 	}
 }
@@ -68,7 +68,7 @@ func (s *C2Server) ListenAndServeTLS(addr, certFile, keyFile string) error {
 		Addr:    addr,
 		Handler: s.mux,
 		TLSConfig: &tls.Config{
-			MinVersion: tls.VersionTLS13,
+			MinVersion: tls.VersionTLS12,
 		},
 	}
 	return srv.ListenAndServeTLS(certFile, keyFile)
