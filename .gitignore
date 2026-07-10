@@ -38,3 +38,5 @@ tls/*.pem
 # OS
 .DS_Store
 Thumbs.db
+
+Testing-builds/

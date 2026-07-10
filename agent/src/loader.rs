@@ -187,6 +187,12 @@ unsafe fn find_module_peb(dll_name_ansi: *const u8) -> Option<usize> {
     None
 }
 
+/// Public wrapper: returns the DllBase for a loaded module, or 0.
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+pub fn get_module_base(dll_name_ansi: *const u8) -> usize {
+    unsafe { find_module_peb(dll_name_ansi).unwrap_or(0) }
+}
+
 /// Walk a PE export table to resolve a function by name.
 /// Avoids GetProcAddress from non-image memory.
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]

