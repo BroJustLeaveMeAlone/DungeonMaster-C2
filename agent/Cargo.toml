@@ -100,6 +100,7 @@ windows-sys = { version = "0.52", features = [
     "Win32_System_Kernel",
     "Win32_System_Time",
     "Win32_Networking_WinHttp",
+    "Win32_System_Registry",
 ] }
 
 [profile.release]

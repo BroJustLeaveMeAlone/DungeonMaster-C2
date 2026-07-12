@@ -144,6 +144,7 @@ pub const HASH_NT_CLOSE: u32 = fnv1a(b"NtClose");
 pub const HASH_NT_CREATE_SECTION: u32 = fnv1a(b"NtCreateSection");
 pub const HASH_NT_MAP_VIEW_OF_SECTION: u32 = fnv1a(b"NtMapViewOfSection");
 pub const HASH_NT_OPEN_SECTION: u32 = fnv1a(b"NtOpenSection");
+pub const HASH_NT_QUERY_VIRTUAL_MEMORY: u32 = fnv1a(b"NtQueryVirtualMemory");
 
 pub static mut SSN_NT_ALLOCATE_VIRTUAL_MEMORY: u32 = 0;
 pub static mut SSN_NT_FREE_VIRTUAL_MEMORY: u32 = 0;
@@ -165,6 +166,7 @@ pub static mut SSN_NT_CREATE_SECTION: u32 = 0;
 #[no_mangle]
 pub static mut SSN_NT_MAP_VIEW_OF_SECTION: u32 = 0;
 pub static mut SSN_NT_OPEN_SECTION: u32 = 0;
+pub static mut SSN_NT_QUERY_VIRTUAL_MEMORY: u32 = 0;
 
 /// NtQueryInformationProcess(ProcessBasicInformation) result — ProcessBasicInformation (class 0).
 /// Layout is stable across all NT 6.x+ versions.
@@ -291,9 +293,12 @@ pub fn init() -> bool {
         resolve!(HASH_NT_CLOSE,                       SSN_NT_CLOSE);
         resolve!(HASH_NT_CREATE_SECTION,              SSN_NT_CREATE_SECTION);
         resolve!(HASH_NT_MAP_VIEW_OF_SECTION,         SSN_NT_MAP_VIEW_OF_SECTION);
-        // Non-fatal: NtOpenSection is only needed when the unhook feature is active.
+        // Non-fatal: NtOpenSection / NtQueryVirtualMemory resolved opportunistically.
         if let Some(s) = resolve_ssn(HASH_NT_OPEN_SECTION) {
             SSN_NT_OPEN_SECTION = s;
+        }
+        if let Some(s) = resolve_ssn(HASH_NT_QUERY_VIRTUAL_MEMORY) {
+            SSN_NT_QUERY_VIRTUAL_MEMORY = s;
         }
     }
     true
@@ -723,6 +728,25 @@ pub unsafe fn nt_create_section(
         page_prot,
         alloc_attrs,
         0,
+    )
+}
+
+pub unsafe fn nt_query_virtual_memory(
+    process: isize,
+    base_addr: *const u8,
+    info_class: u32,
+    info: *mut u8,
+    info_len: usize,
+    return_len: *mut usize,
+) -> i32 {
+    dm_syscall(
+        SSN_NT_QUERY_VIRTUAL_MEMORY,
+        process as u64,
+        base_addr as u64,
+        info_class as u64,
+        info as u64,
+        info_len as u64,
+        return_len as u64,
     )
 }
 

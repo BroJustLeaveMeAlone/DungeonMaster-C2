@@ -24,6 +24,7 @@ pub fn run(task: &Task) -> TaskOutput {
         "antifor"      => crate::antifor::exec_antifor(task),
         "collect"      => crate::collect::exec_collect(task),
         "lateral"      => crate::lateral::exec_lateral(task),
+        "file"         => crate::filemgr::exec_file(task),
         other          => TaskOutput::failure(&format!("unknown task type: {other}")),
     }
 }
