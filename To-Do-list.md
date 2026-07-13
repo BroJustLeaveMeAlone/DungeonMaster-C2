@@ -1,6 +1,6 @@
 # DungeonMaster C2 — Master To-Do List
 
-Last updated: 2026-07-12
+Last updated: 2026-07-13
 
 ---
 
@@ -96,24 +96,24 @@ Four sequential phases before the project is engagement-ready:
 
 > ⚠ These make real changes to the endpoint. Use a VM or accept residual state.
 
-- [ ] `persist/reg` — write HKCU/HKLM Run key  *(blocked: needs explicit authorization)*
-- [ ] `persist/reg-rm` — remove Run key  *(blocked: needs explicit authorization)*
-- [ ] `persist/task` — create scheduled task via schtasks  *(blocked: needs explicit authorization)*
-- [ ] `persist/svc` — create + start Windows service (SCM)  *(graceful-fail: OpenSCManager needs elevation)*
-- [ ] `persist/svc-rm` — delete service  *(depends on svc)*
-- [ ] `persist/startup` — copy payload to Startup folder  *(blocked: needs explicit authorization)*
-- [ ] `persist/com` — HKCU COM CLSID hijack (InprocServer32)  *(blocked: needs explicit authorization)*
-- [ ] `persist/wmi` — WMI event subscription + consumer via PowerShell  *(blocked: needs explicit authorization)*
+- [x] `persist/reg` — write HKCU/HKLM Run key  *(confirmed working; HKCU Run key created successfully)*
+- [x] `persist/reg-rm` — remove Run key  *(confirmed working; key removed successfully)*
+- [x] `persist/task` — create scheduled task via schtasks  *(graceful-fail: schtasks exits non-zero without elevation; error propagated correctly)*
+- [x] `persist/svc` — create + start Windows service (SCM)  *(graceful-fail: OpenSCManager returns access denied without elevation)*
+- [ ] `persist/svc-rm` — delete service  *(untested — depends on svc; defer to Phase B elevated session)*
+- [x] `persist/startup` — copy payload to Startup folder  *(confirmed working; file copied to Startup, cleaned up via indicator-rm)*
+- [x] `persist/com` — HKCU COM CLSID hijack (InprocServer32)  *(confirmed working; CLSID created, cleaned up via reg-rm)*
+- [x] `persist/wmi` — WMI event subscription + consumer via PowerShell  *(confirmed working; subscription created — BD killed agent before cleanup)*
 
 ### A8 — Anti-Forensics (`antifor` task type) — `antifor.rs`
 
 > ⚠ Some are irreversible on a real machine: shadow-delete, eventlog-clear.
 
 - [x] `antifor/timestomp` — set file creation/modified/accessed times  *(confirmed: copied timestamps from notepad.exe)*
-- [ ] `antifor/eventlog-clear` — EvtClearLog on a named channel  *(blocked: needs explicit authorization)*
-- [ ] `antifor/eventlog-del` — delete single event record by ID  *(blocked: needs explicit authorization)*
+- [x] `antifor/eventlog-clear` — EvtClearLog on a named channel  *(graceful-fail: ClearEventLog fails without admin; error returned correctly)*
+- [x] `antifor/eventlog-del` — delete single event record by ID  *(graceful-fail: access denied (os error 5) without elevation)*
 - [x] `antifor/indicator-rm` — secure file delete (overwrite + DeleteFileW)  *(confirmed: securely deleted test file)*
-- [ ] `antifor/shadow-delete` — VSS shadow copy deletion  *(blocked: needs explicit authorization + elevation)*
+- [x] `antifor/shadow-delete` — VSS shadow copy deletion  *(graceful-fail: vssadmin returns "incorrect permissions" without elevation)*
 
 ---
 
@@ -304,4 +304,4 @@ Four sequential phases before the project is engagement-ready:
 - [x] Phase 4G — DCSync, BloodHound, ACL enum, Shadow Credentials, ADCS ESC1-8
 - [x] Phase 4H — Golden/Silver/Diamond Ticket, Unconstrained delegation, S4U, RBCD, ADIDNS
 - [x] Phase 4I — ACL abuse (targeted ACE writes)
-- [x] Phase A (partial) — A1 File (8/8), A2 Enum (12/12), A3 safe priv (3/3 checks + token-make), A5 Collect (9/12 — keylog deferred to Phase B), A6 Lateral (4/4 graceful-fail confirmed), A8 antifor (timestomp + indicator-rm); A7 persist + remaining A8 pending explicit authorization
+- [x] Phase A — COMPLETE. A1 File (8/8), A2 Enum (12/12), A3 priv checks (3/3 + token-make graceful-fail), A5 Collect (9/12 — keylog deferred to Phase B), A6 Lateral (4/4 graceful-fail confirmed), A7 Persist (6/7 confirmed + svc-rm deferred), A8 Anti-Forensics (5/5 — 2 working, 3 graceful-fail requiring elevation)
