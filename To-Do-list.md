@@ -1,6 +1,6 @@
 # DungeonMaster C2 — Master To-Do List
 
-Last updated: 2026-07-13
+Last updated: 2026-07-14
 
 ---
 
@@ -147,76 +147,75 @@ Four sequential phases before the project is engagement-ready:
 ### B3 — Per-Feature BD Testing
 
 > For each feature: queue task → observe BD → verify task completes → record result.
-> Status: ✅ Clean | ⚠ Partial (BD alert but task completes) | ❌ Blocked (BD kills task or quarantines)
+> Legend: ✅ clean (zero BD + works) | ✅~ clean (zero BD + graceful-fail expected) | ❌ detected/blocked | ⏸ deferred (needs AD lab / elevated session)
 
-**File Manager**
-- [ ] `file/ls`, `file/read`, `file/write`, `file/rm`, `file/mkdir`, `file/mv`, `file/cp`, `file/info`
+**File Manager** — all 8 clean, confirmed 2026-07-13
+- [x] `file/ls` ✅ | `file/read` ✅ | `file/write` ✅ | `file/rm` ✅
+- [x] `file/mkdir` ✅ | `file/mv` ✅ | `file/cp` ✅ | `file/info` ✅
 
-**Enumeration**
-- [ ] `enum/processes`, `enum/services`, `enum/tasks`, `enum/sessions`, `enum/shares`
-- [ ] `enum/users`, `enum/groups`, `enum/localadmins`, `enum/computer`
-- [ ] `enum/domain`, `enum/netdiscovery`, `enum/routes`
-- [ ] `enum/bloodhound`, `enum/acl`, `enum/unconstrained-deleg`
+**Enumeration** — all 12 clean (non-AD), confirmed 2026-07-13
+- [x] `enum/processes` ✅ | `enum/services` ✅ | `enum/tasks` ✅ | `enum/sessions` ✅ | `enum/shares` ✅
+- [x] `enum/users` ✅ | `enum/groups` ✅ | `enum/localadmins` ✅ | `enum/computer` ✅
+- [x] `enum/domain` ✅ | `enum/netdiscovery` ✅ | `enum/routes` ✅
+- [ ] `enum/bloodhound`, `enum/acl`, `enum/unconstrained-deleg` ⏸ — need AD lab (tested in Phase 4G-4H, BD evasion not verified)
 
 **Privilege Escalation**
-- [ ] `priv/sam-dump` — LSASS and hive access; likely highest-risk for BD kernel driver
-- [ ] `priv/token-steal` — OpenProcessToken on winlogon; monitored
-- [ ] `priv/token-make` — LogonUser; lower signal
-- [ ] `priv/uac-fodhelper`, `priv/uac-eventvwr`, `priv/uac-sdclt`
-- [ ] `priv/pipe-impersonate`
-- [ ] `priv/potato` — schtasks + named pipe; schtasks is a known BD behavioral rule
-- [ ] `priv/unquoted-paths`, `priv/dll-hijack`, `priv/always-install-elevated`
-- [ ] `priv/shadow-creds`, `priv/adcs`, `priv/s4u`, `priv/rbcd`, `priv/acl-abuse`
+- [x] `priv/sam-dump` ✅~ graceful-fail (needs SeBackupPrivilege) — zero BD alerts
+- [x] `priv/token-steal` ✅~ graceful-fail (NtOpenProcess denied, not elevated) — zero BD alerts
+- [x] `priv/token-make` ✅~ graceful-fail (LogonUserW failed — expected with bad creds)
+- [x] `priv/uac-fodhelper` ❌ ShellExecuteW returns ≤32 — BD exploit protection blocking elevation; needs rework
+- [x] `priv/uac-eventvwr` ❌ ShellExecuteW blocked + code bug: key deleted before eventvwr launch; needs fix
+- [x] `priv/uac-sdclt` ❌ ShellExecuteW blocked — same BD exploit protection; needs rework
+- [x] `priv/pipe-impersonate` ✅~ graceful-fail (15s timeout, no client) — zero BD alerts
+- [x] `priv/unquoted-paths` ✅ | `priv/dll-hijack` ✅ | `priv/always-install-elevated` ✅
+- [ ] `priv/potato` ⏸ — not yet tested in BD context
+- [ ] `priv/shadow-creds`, `priv/adcs`, `priv/s4u`, `priv/rbcd`, `priv/acl-abuse` ⏸ — need AD lab
 
 **Credential Access**
-- [ ] `cred/lsass` — MiniDumpWriteDump; highest-risk feature
-- [ ] `cred/lsass-pss` — PSS approach; quieter
-- [ ] `cred/lsass-syscall` — direct syscall; stealthiest of the three
-- [ ] `cred/kerberoast`, `cred/asrep-roast`
-- [ ] `cred/pth`, `cred/ptt`, `cred/opth`
-- [ ] `cred/dcsync`
-- [ ] `cred/golden-ticket`, `cred/silver-ticket`, `cred/diamond-ticket`
+- [x] `cred/lsass` ✅~ graceful-fail (NtOpenProcess failed — not elevated) — zero BD alerts
+- [ ] `cred/lsass-pss`, `cred/lsass-syscall` ⏸ — need elevated session
+- [ ] `cred/kerberoast`, `cred/asrep-roast`, `cred/pth`, `cred/ptt`, `cred/opth` ⏸ — need AD lab
+- [ ] `cred/dcsync` ⏸ — need AD lab
+- [ ] `cred/golden-ticket`, `cred/silver-ticket`, `cred/diamond-ticket` ⏸ — need AD lab
 
-**Collection**
-- [ ] `collect/clipboard`, `collect/dpapi`, `collect/wifi`, `collect/vault`
-- [ ] `collect/browser-creds` — DPAPI + SQLite read; BD monitors Chrome DB access
-- [ ] `collect/browser-history`, `collect/file-search`
-- [ ] `collect/screen-record`, `collect/keylog-start/dump/stop`
-- [ ] `collect/ssh-keys`, `collect/certs`, `collect/email`
+**Collection** — confirmed 2026-07-13
+- [x] `collect/clipboard` ✅ | `collect/dpapi` ✅ | `collect/wifi` ✅~ | `collect/vault` ✅
+- [x] `collect/browser-creds` ✅~ | `collect/browser-history` ✅~ | `collect/file-search` ✅
+- [x] `collect/screen-record` ✅ | `collect/ssh-keys` ✅~ | `collect/certs` ✅ | `collect/email` ✅
+- [x] `collect/keylog-start` ❌ SetWindowsHookExW returns NULL — BD blocking WH_KEYBOARD_LL install; needs alternative hook method
+- [x] `collect/keylog-dump`, `collect/keylog-stop` — blocked by keylog-start failure
 
-**Lateral Movement**
-- [ ] `lateral/smb-psexec` — SCM remote service creation; high BD signal
-- [ ] `lateral/wmi` — wmic child process; monitored
-- [ ] `lateral/winrm` — winrs child process
-- [ ] `lateral/dcom`
-- [ ] `lateral/rdp-pth`
-- [ ] `lateral/adidns`
+**Lateral Movement** — confirmed 2026-07-13 (all graceful-fail, zero BD alerts)
+- [x] `lateral/smb-psexec` ✅~ | `lateral/wmi` ✅~ | `lateral/winrm` ✅~ | `lateral/dcom` ✅~
+- [ ] `lateral/rdp-pth`, `lateral/adidns` ⏸ — need AD lab / live target
 
-**Persistence**
-- [ ] `persist/reg` — Run key; BD monitors this heavily
-- [ ] `persist/task` — schtasks; very high BD signal
-- [ ] `persist/svc` — service creation; high BD signal
-- [ ] `persist/startup` — startup folder copy; moderate signal
-- [ ] `persist/com` — HKCU COM hijack; moderate signal
-- [ ] `persist/wmi` — WMI subscription; high BD signal
+**Persistence** — confirmed 2026-07-13/14
+- [x] `persist/reg` ✅ — set HKCU Run key, zero BD alerts
+- [x] `persist/reg-rm` ✅ — removed key cleanly
+- [x] `persist/task` ✅ — schtasks spawned and succeeded, zero BD alerts
+- [x] `persist/startup` ✅ — file copied to Startup folder, zero BD alerts
+- [x] `persist/com` ✅ — CLSID hijack written to HKCU, zero BD alerts
+- [x] `persist/wmi` ❌ DETECTED: ATC.Malicious (score=61) on powershell.exe spawn + CMD:Heur on wmic.exe; needs direct WMI COM API in Rust (no PS spawning)
+- [ ] `persist/svc` ⏸ — needs elevated session (OpenSCManager access denied)
+- [ ] `persist/svc-rm` ⏸ — depends on svc
 
-**Anti-Forensics**
-- [ ] `antifor/timestomp` — SetFileTime; low signal
-- [ ] `antifor/eventlog-clear` — EvtClearLog; BD alerts on this
-- [ ] `antifor/eventlog-del`
-- [ ] `antifor/indicator-rm`
-- [ ] `antifor/shadow-delete` — VSS deletion; BD will almost certainly alert
+**Anti-Forensics** — confirmed 2026-07-13
+- [x] `antifor/timestomp` ✅ — SetFileTime, zero BD alerts
+- [x] `antifor/indicator-rm` ✅ — secure file delete, zero BD alerts
+- [x] `antifor/eventlog-clear` ✅~ graceful-fail (needs admin) — zero BD alerts
+- [x] `antifor/eventlog-del` ✅~ graceful-fail (needs admin) — zero BD alerts
+- [x] `antifor/shadow-delete` ❌ DETECTED: CMD:Heur.BZC.Cross.7.1899B5BF on `wmic shadowcopy delete`; needs direct VSS COM API in Rust
 
 ### B4 — Fix Iteration
 
-> For each ❌ or ⚠ item in B3: implement evasion fix, rebuild, retest until ✅.
+> For each ❌ item in B3: implement evasion fix, rebuild, retest until ✅.
+> Confirmed detections from B3 (2026-07-13/14):
 
-- [ ] Persistence: replace schtasks/sc.exe shell calls with direct API calls (WMI COM, SCM direct, etc.)
-- [ ] LSASS: evaluate kernel-handle duplication or driver-assisted dump if BD blocks all three variants
-- [ ] Token stealing: evaluate direct SYSTEM token path vs. named object enumeration approach
-- [ ] Eventlog: evaluate direct binary manipulation of .evtx files vs. EvtClearLog API
-- [ ] Browser creds: evaluate VSS snapshot copy approach to bypass locked-file detection
-- [ ] All `cmd.exe`-spawning methods: replace with direct API equivalents
+- [ ] **persist/wmi** — Replace PowerShell spawn with direct WMI COM API in Rust (IWbemServices::PutInstance for EventFilter + CommandLineEventConsumer + FilterToConsumerBinding). No cmd.exe or powershell.exe spawning.
+- [ ] **antifor/shadow-delete** — Replace `vssadmin`/`wmic shadowcopy delete` shell calls with direct VSS COM API in Rust (IVssBackupComponents::DeleteSnapshots). No child process spawning.
+- [ ] **priv/uac-fodhelper**, **priv/uac-sdclt** — ShellExecuteW blocked by BD exploit protection. Investigate: (a) use CreateProcess with explicit path to fodhelper.exe/sdclt.exe, (b) use NtCreateUserProcess directly, (c) evaluate alternative bypass (token hijack + CreateProcessAsUser). Fix uac-eventvwr code bug: move reg_delete to AFTER launch, not before.
+- [ ] **collect/keylog** — SetWindowsHookExW (WH_KEYBOARD_LL) blocked at API level. Alternative: (a) Raw Input API (RegisterRawInputDevices), (b) DirectInput, (c) inject hook into explorer.exe instead. No new child processes needed.
+- [ ] After all B4 fixes: rebuild agent (phase5 or B4-specific build), re-run B3 sweep for all fixed features
 
 ---
 
