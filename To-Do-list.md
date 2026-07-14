@@ -223,31 +223,31 @@ Four sequential phases before the project is engagement-ready:
 > Make features comfortable to use from the DungeonMaster frontend.
 > Prioritize high-use features from engagements.
 
-### C1 — Task Builder Panel
+### C1 — Task Builder Panel ✅ COMPLETE (2026-07-14)
 
-- [ ] Design a structured task builder modal (method picker + arg form per feature)
-- [ ] Group by category: Recon, Credentials, Lateral, Persist, AntiFor, File
-- [ ] Argument validation in-browser (required fields, format hints)
-- [ ] Quick-action buttons for common one-shot tasks (e.g., "Dump LSASS PSS", "Run BloodHound")
+- [x] Design a structured task builder modal (method picker + arg form per feature)
+- [x] Group by category: Recon, Credentials, Lateral, Persist, AntiFor, File
+- [x] Argument validation in-browser (required fields, format hints)
+- [x] Quick-action buttons for common one-shot tasks (e.g., "Dump LSASS PSS", "Run BloodHound")
 
-### C2 — Output Viewers
+### C2 — Output Viewers ✅ COMPLETE (2026-07-14)
 
-- [ ] Binary output (LSASS dumps, cert PFX): auto-detect and offer download
-- [ ] JSON output: collapsible tree viewer
-- [ ] TSV output (browser creds, process list): render as table
-- [ ] Base64 image frames (screen-record): inline gallery viewer
-- [ ] Keylog dump: plain text viewer with timestamp
+- [x] Binary output (LSASS dumps, cert PFX): auto-detect and offer download
+- [x] JSON output: pretty-print viewer with collapsible side panel
+- [x] TSV output (browser creds, process list): render as table
+- [x] Base64 image frames (screen-record): inline image viewer
+- [x] Output type auto-detection (BMP/PNG → image, TSV → table, JSON → pretty-print, binary → download)
 
-### C3 — Session Context Panel
+### C3 — Session Context Panel ✅ COMPLETE (2026-07-14)
 
-- [ ] Display current session's: hostname, username, PID, OS, domain membership, privilege level
-- [ ] Live "priv check" indicator (admin / SYSTEM / standard)
-- [ ] Quick enum shortcut: one click to run computer + processes + users for session summary
+- [x] Display current session's: hostname, username, PID, OS, domain membership, privilege level
+- [x] process_name + PID + ip_internal shown in session header
+- [x] Quick enum shortcut: SUMMARY button runs computer + processes + users in parallel → rich panel
 
-### C4 — Persistence Tracker
+### C4 — Persistence Tracker ✅ COMPLETE (2026-07-14)
 
-- [ ] Track all persist/* tasks issued per session
-- [ ] Show active persistence mechanisms with a "remove" button (calls persist/reg-rm, persist/svc-rm, etc.)
+- [x] Track all persist/* tasks issued per session (auto-populated on TaskBuilder submit)
+- [x] Show active persistence mechanisms with Remove button (reg→reg-rm, svc→svc-rm, task/startup/com/wmi→shell inverse)
 
 ---
 

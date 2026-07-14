@@ -3,10 +3,12 @@ import { Terminal } from 'xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import 'xterm/css/xterm.css'
 import { api } from '../../api/client'
+import { type RichContent, detectOutputType } from './RichOutput'
 
 interface Props {
-  sessionId:   string
-  campaignId?: string
+  sessionId:    string
+  campaignId?:  string
+  onRichOutput?: (content: RichContent) => void
 }
 
 const HELP_LINES = [
@@ -58,7 +60,7 @@ function tokenize(line: string): string[] {
   return tokens
 }
 
-export function SessionConsole({ sessionId, campaignId: _campaignId }: Props) {
+export function SessionConsole({ sessionId, campaignId: _campaignId, onRichOutput }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const termRef      = useRef<HTMLDivElement>(null)
   const term         = useRef<Terminal>()
@@ -155,7 +157,7 @@ export function SessionConsole({ sessionId, campaignId: _campaignId }: Props) {
           type,
           args: btoa(JSON.stringify(args)),
         })
-        await pollTaskOutput(data.task_id)
+        await pollTaskOutput(data.task_id, `${type}/${method}`)
       } catch (err: unknown) {
         term.current?.writeln(`\x1b[31mError: ${(err as Error).message}\x1b[0m`)
       } finally {
@@ -179,15 +181,31 @@ export function SessionConsole({ sessionId, campaignId: _campaignId }: Props) {
     }
   }
 
-  async function pollTaskOutput(taskId: string) {
+  async function pollTaskOutput(taskId: string, label = 'task') {
     for (let attempt = 0; attempt < 60; attempt++) {
       await sleep(2000)
       try {
         const { data } = await api.get(`/api/v1/tasks/${taskId}`)
         if (data.status === 'complete' || data.status === 'failed') {
-          const output = data.output ? atob(data.output) : '(no output)'
-          const color  = data.status === 'complete' ? '\x1b[0m' : '\x1b[31m'
-          term.current?.writeln(`${color}${output}\x1b[0m`)
+          if (data.status === 'failed') {
+            term.current?.writeln('\x1b[31m[failed]\x1b[0m')
+            return
+          }
+          if (!data.output) {
+            term.current?.writeln('\x1b[90m(no output)\x1b[0m')
+            return
+          }
+          const bytes = Uint8Array.from(atob(data.output), c => c.charCodeAt(0))
+          if (onRichOutput) {
+            const rich = detectOutputType(bytes, label)
+            if (rich) {
+              term.current?.writeln('\x1b[90m[→ output panel]\x1b[0m')
+              onRichOutput(rich)
+              return
+            }
+          }
+          const text = new TextDecoder().decode(bytes)
+          term.current?.writeln(`\x1b[0m${text}\x1b[0m`)
           return
         }
       } catch {
