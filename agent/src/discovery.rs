@@ -659,7 +659,7 @@ fn reg_read_os_info() -> (String, String) {
     const HKLM: isize = -2147483646isize;
     const KEY_READ: u32 = 0x20019;
 
-    use windows_sys::Win32::System::Registry::{RegOpenKeyExA, RegQueryValueExA, RegCloseKey, REG_SZ};
+    use windows_sys::Win32::System::Registry::{RegOpenKeyExA, RegQueryValueExA, RegCloseKey};
 
     let mut hkey: isize = 0;
     let sub = std::ffi::CString::new(key).unwrap();

