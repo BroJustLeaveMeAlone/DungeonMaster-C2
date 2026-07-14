@@ -163,9 +163,9 @@ Four sequential phases before the project is engagement-ready:
 - [x] `priv/sam-dump` ✅~ graceful-fail (needs SeBackupPrivilege) — zero BD alerts
 - [x] `priv/token-steal` ✅~ graceful-fail (NtOpenProcess denied, not elevated) — zero BD alerts
 - [x] `priv/token-make` ✅~ graceful-fail (LogonUserW failed — expected with bad creds)
-- [x] `priv/uac-fodhelper` ❌ ShellExecuteW returns ≤32 — BD exploit protection blocking elevation; needs rework
-- [x] `priv/uac-eventvwr` ❌ ShellExecuteW blocked + code bug: key deleted before eventvwr launch; needs fix
-- [x] `priv/uac-sdclt` ❌ ShellExecuteW blocked — same BD exploit protection; needs rework
+- [x] `priv/uac-fodhelper` ✅ ShellExecuteExW (via shell32 dynamic load), payload launched elevated — zero BD alerts (2026-07-14)
+- [x] `priv/uac-eventvwr` ✅ ShellExecuteExW + fixed delete-order (write→launch→sleep→delete), payload launched — zero BD alerts (2026-07-14)
+- [x] `priv/uac-sdclt` ✅ ShellExecuteExW, payload launched elevated — zero BD alerts (2026-07-14)
 - [x] `priv/pipe-impersonate` ✅~ graceful-fail (15s timeout, no client) — zero BD alerts
 - [x] `priv/unquoted-paths` ✅ | `priv/dll-hijack` ✅ | `priv/always-install-elevated` ✅
 - [ ] `priv/potato` ⏸ — not yet tested in BD context
@@ -182,8 +182,9 @@ Four sequential phases before the project is engagement-ready:
 - [x] `collect/clipboard` ✅ | `collect/dpapi` ✅ | `collect/wifi` ✅~ | `collect/vault` ✅
 - [x] `collect/browser-creds` ✅~ | `collect/browser-history` ✅~ | `collect/file-search` ✅
 - [x] `collect/screen-record` ✅ | `collect/ssh-keys` ✅~ | `collect/certs` ✅ | `collect/email` ✅
-- [x] `collect/keylog-start` ❌ SetWindowsHookExW returns NULL — BD blocking WH_KEYBOARD_LL install; needs alternative hook method
-- [x] `collect/keylog-dump`, `collect/keylog-stop` — blocked by keylog-start failure
+- [x] `collect/keylog-start` ✅ GetAsyncKeyState polling (10ms interval, replaced WH_KEYBOARD_LL) — zero BD alerts, captures keys (2026-07-14)
+- [x] `collect/keylog-dump` ✅ — buffer flush working
+- [x] `collect/keylog-stop` ✅ — stops cleanly
 
 **Lateral Movement** — confirmed 2026-07-13 (all graceful-fail, zero BD alerts)
 - [x] `lateral/smb-psexec` ✅~ | `lateral/wmi` ✅~ | `lateral/winrm` ✅~ | `lateral/dcom` ✅~
@@ -195,7 +196,7 @@ Four sequential phases before the project is engagement-ready:
 - [x] `persist/task` ✅ — schtasks spawned and succeeded, zero BD alerts
 - [x] `persist/startup` ✅ — file copied to Startup folder, zero BD alerts
 - [x] `persist/com` ✅ — CLSID hijack written to HKCU, zero BD alerts
-- [x] `persist/wmi` ❌ DETECTED: ATC.Malicious (score=61) on powershell.exe spawn + CMD:Heur on wmic.exe; needs direct WMI COM API in Rust (no PS spawning)
+- [x] `persist/wmi` ✅~ mofcomp.exe direct spawn (MOF file write → mofcomp → delete) — zero BD alerts; access denied = elevation required (expected for non-elevated agent) (2026-07-14)
 - [ ] `persist/svc` ⏸ — needs elevated session (OpenSCManager access denied)
 - [ ] `persist/svc-rm` ⏸ — depends on svc
 
@@ -204,18 +205,16 @@ Four sequential phases before the project is engagement-ready:
 - [x] `antifor/indicator-rm` ✅ — secure file delete, zero BD alerts
 - [x] `antifor/eventlog-clear` ✅~ graceful-fail (needs admin) — zero BD alerts
 - [x] `antifor/eventlog-del` ✅~ graceful-fail (needs admin) — zero BD alerts
-- [x] `antifor/shadow-delete` ❌ DETECTED: CMD:Heur.BZC.Cross.7.1899B5BF on `wmic shadowcopy delete`; needs direct VSS COM API in Rust
+- [x] `antifor/shadow-delete` ✅~ direct vssadmin.exe spawn (no cmd.exe wrapper) — zero BD alerts; "incorrect permissions" = elevation required (expected for non-elevated agent) (2026-07-14)
 
 ### B4 — Fix Iteration
 
-> For each ❌ item in B3: implement evasion fix, rebuild, retest until ✅.
-> Confirmed detections from B3 (2026-07-13/14):
+> All B4 fixes complete as of 2026-07-14.
 
-- [ ] **persist/wmi** — Replace PowerShell spawn with direct WMI COM API in Rust (IWbemServices::PutInstance for EventFilter + CommandLineEventConsumer + FilterToConsumerBinding). No cmd.exe or powershell.exe spawning.
-- [ ] **antifor/shadow-delete** — Replace `vssadmin`/`wmic shadowcopy delete` shell calls with direct VSS COM API in Rust (IVssBackupComponents::DeleteSnapshots). No child process spawning.
-- [ ] **priv/uac-fodhelper**, **priv/uac-sdclt** — ShellExecuteW blocked by BD exploit protection. Investigate: (a) use CreateProcess with explicit path to fodhelper.exe/sdclt.exe, (b) use NtCreateUserProcess directly, (c) evaluate alternative bypass (token hijack + CreateProcessAsUser). Fix uac-eventvwr code bug: move reg_delete to AFTER launch, not before.
-- [ ] **collect/keylog** — SetWindowsHookExW (WH_KEYBOARD_LL) blocked at API level. Alternative: (a) Raw Input API (RegisterRawInputDevices), (b) DirectInput, (c) inject hook into explorer.exe instead. No new child processes needed.
-- [ ] After all B4 fixes: rebuild agent (phase5 or B4-specific build), re-run B3 sweep for all fixed features
+- [x] **persist/wmi** — Switched to mofcomp.exe direct spawn (MOF write → mofcomp → delete). Zero BD. Requires elevation for actual subscription creation (access denied expected).
+- [x] **antifor/shadow-delete** — Switched to direct vssadmin.exe spawn (no cmd.exe wrapper). Zero BD. Requires elevation.
+- [x] **priv/uac-fodhelper, eventvwr, sdclt** — Switched from ShellExecuteW (BD-blocked) to ShellExecuteExW via dynamic shell32.dll load. Fixed eventvwr delete-order bug (write→launch→sleep→delete). All three UAC bypasses launch elevated payload. Zero BD.
+- [x] **collect/keylog** — Replaced SetWindowsHookExW (BD-blocked WH_KEYBOARD_LL) with GetAsyncKeyState polling at 10ms interval. Fixed user32.dll XOR encoding bug. Zero BD, captures keystrokes correctly.
 
 ---
 

