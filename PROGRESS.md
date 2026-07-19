@@ -1,6 +1,6 @@
 # DungeonMaster C2 — Progress Tracker
 
-Last updated: 2026-07-19 (session 3)
+Last updated: 2026-07-19 (session 4)
 
 ---
 
@@ -29,8 +29,20 @@ Need domain admin + full AD lab. See §AD-Only Backlog below.
 - **Next action:** Try WinRE keyboard navigation on DC01 (same approach that worked for TARGET01 password fix). Or try common prefix + @DC2023.
 - **Blocks:** All AD-only features (Stage 3) and Stage 2 features that need domain admin.
 
-### Stage 2 next action:
-Retest lateral features (smb-psexec, wmi, dcom) with dm-v19 self-target. winrm already confirmed. Then move to Stage 3 (DC01 domain admin required).
+### Stage 2 — COMPLETE ✅
+All lateral features confirmed. Only `cred/lsass` permanently WD-blocked. Move to Stage 3 (DC01 domain admin required).
+
+---
+
+## Stage 2 Results — Session 4 (2026-07-19)
+
+Session: `07cd1b3e` on TARGET01\Administrator (dm-v19.exe, PID 4476, 911360 bytes — bat-wrapper smb-psexec fix)
+
+| Feature | Result | Notes |
+|---------|--------|-------|
+| `lateral/smb-psexec` | ✅ complete | `nt authority\system` — bat-wrapper fix: writes `@echo off\r\n{cmd} > "{output}" 2>&1` to `~dmlat{id}.bat`, schtasks runs the bat. Output captured correctly. |
+| `lateral/wmi` | ✅ complete | `status=complete` — PS Win32_Process.Create fallback for Win11 (no wmic.exe). Fire-and-forget as expected. |
+| `lateral/dcom` | ✅ complete | `status=complete` — routes through WMI path. Fire-and-forget as expected. |
 
 ---
 
@@ -89,7 +101,7 @@ Session: `0d87d53b` (TARGET01\Administrator — local admin, not domain admin)
 
 ---
 
-## Confirmed ✅ — 52 features fully working + zero WD alerts
+## Confirmed ✅ — 57 features fully working + zero WD alerts
 
 **File Manager (8):** `ls` `read` `write` `rm` `mkdir` `mv` `cp` `info`
 
@@ -107,18 +119,20 @@ Session: `0d87d53b` (TARGET01\Administrator — local admin, not domain admin)
 
 **Privilege Escalation (5):** `potato` `sam-dump` `token-steal` `token-make` `pipe-impersonate`
 
+**Lateral Movement (4):** `smb-psexec` `wmi` `dcom` `winrm`
+
 ---
 
-## Graceful-Fail Backlog — Stage 2 remaining
+## Graceful-Fail Backlog — Stage 2 COMPLETE
 
-| Feature | Status | What's needed |
-|---------|--------|---------------|
+| Feature | Status | Notes |
+|---------|--------|-------|
 | `cred/lsass` | ❌ WD permanent | WD behavioral detection, no fix available with DM_NO_EVASION=true |
 | `collect/wifi` | ✅ skip | No WiFi adapter on VM — graceful-fail is correct behavior |
-| `lateral/smb-psexec` | 🔧 fixed (untested) | schtasks-based execution (code fix in lateral.rs). Needs self-target retest with dm-v19. |
-| `lateral/wmi` | 🔧 fixed (untested) | PS WMI fallback for Win11 (code fix in lateral.rs). Needs self-target retest with dm-v19. |
-| `lateral/winrm` | ✅ complete | Confirmed working (self-target: whoami output) in prior session |
-| `lateral/dcom` | 🔧 fixed (untested) | Routes through WMI — same fix covers it. Needs retest. |
+| `lateral/smb-psexec` | ✅ complete | bat-wrapper fix confirmed |
+| `lateral/wmi` | ✅ complete | PS WMI fallback confirmed |
+| `lateral/winrm` | ✅ complete | Self-target confirmed |
+| `lateral/dcom` | ✅ complete | Routes through WMI, confirmed |
 
 ---
 
@@ -145,7 +159,9 @@ Requires domain admin session + DC01 running.
 - **C2 server body limit:** Increased to 256MB in `server/internal/api/c2.go:175` — required for LSASS dumps (~105MB base64).
 - **potato trigger:** Use `echo x>{pipe}` (writes to pipe), not `type {pipe}` (reads from pipe). Server must ReadFile before ImpersonateNamedPipeClient.
 - **schtasks invocation:** Call `schtasks.exe` directly, NOT via `cmd /C "schtasks ..."`. Nested cmd quoting breaks `/TR` parsing.
-- **Agent binary:** `C:\dev\DM-clean\Testing-builds\dm-v19.exe` (910336 bytes, built 2026-07-19). Active session: `028d21f8` on TARGET01 (PID 8788). WD exclusion: `C:\Windows\Temp\` (full dir) added.
+- **Agent binary:** `C:\dev\DM-clean\Testing-builds\dm-v19.exe` (911360 bytes, built 2026-07-19 — bat-wrapper smb-psexec fix). Active session: `07cd1b3e` on TARGET01 (PID 4476). WD exclusion: `C:\Windows\Temp\` (full dir) added.
+- **smb-psexec bat-wrapper:** `>` redirect inside schtasks /TR "cmd /c {cmd} > {out}" gets consumed by outer cmd /C in shell_run. Fix: write a .bat file containing the redirect, schtasks runs the .bat. Output captured as SYSTEM.
+- **lateral API format:** task type=`lateral`, args JSON must contain `method` field (e.g. `{"method":"smb-psexec","host":"127.0.0.1","cmd":"whoami"}`). Not `lateral/smb-psexec`.
 - **pipe-impersonate fixes:** ReadFile drain before ImpersonateNamedPipeClient; 60s timeout; writes pipe name to C:\Windows\Temp\dm-pipe.tmp for trigger coordination; ptrig4.bat reads dm-pipe.tmp and does echo x>%DMPP% as SYSTEM.
 - **PS Direct:** Use `.\Administrator` or `MACHINENAME\Administrator` — bare `Administrator` on domain-joined VM resolves to domain account and fails.
 - **Docker context:** Must be `default`. Run `docker context use default` if builds fail.
