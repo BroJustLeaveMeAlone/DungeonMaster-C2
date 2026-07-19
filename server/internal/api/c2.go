@@ -172,7 +172,7 @@ func (s *C2Server) handlePoll(w http.ResponseWriter, r *http.Request, sessionID 
 }
 
 func (s *C2Server) handleOutput(w http.ResponseWriter, r *http.Request, sessionID string) {
-	body, err := io.ReadAll(io.LimitReader(r.Body, 32*1024*1024))
+	body, err := io.ReadAll(io.LimitReader(r.Body, 256*1024*1024))
 	if err != nil {
 		http.Error(w, "", http.StatusBadRequest)
 		return

