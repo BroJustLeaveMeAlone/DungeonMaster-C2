@@ -1,6 +1,6 @@
 # DungeonMaster C2 — Master To-Do List
 
-Last updated: 2026-07-14
+Last updated: 2026-07-19
 
 ---
 
@@ -48,20 +48,20 @@ Four sequential phases before the project is engagement-ready:
 
 ### A3 — Privilege Escalation (`priv` task type) — `privesc.rs`
 
-- [ ] `priv/sam-dump` — SAM/SYSTEM/SECURITY hive extraction → offline NTLM  *(Phase B)*
-- [ ] `priv/token-steal` — steal SYSTEM token from winlogon, impersonate or spawn  *(Phase B)*
-- [x] `priv/token-make` — LogonUser → impersonate with creds  *(graceful-fail: bad creds → LogonUserW failed, correct)*
-- [ ] `priv/uac-fodhelper` — UAC bypass via ms-settings registry hijack  *(Phase B)*
-- [ ] `priv/uac-eventvwr` — UAC bypass via mscfile registry hijack  *(Phase B)*
-- [ ] `priv/uac-sdclt` — UAC bypass via App Paths control.exe hijack  *(Phase B)*
-- [ ] `priv/pipe-impersonate` — named pipe server, wait for privileged client, impersonate  *(Phase B)*
+- [x] `priv/sam-dump` — SAM/SYSTEM/SECURITY hive extraction → offline NTLM  *(confirmed 2026-07-19: 16MB hives)*
+- [x] `priv/token-steal` — steal SYSTEM token from winlogon, impersonate or spawn  *(confirmed 2026-07-19: impersonating SYSTEM)*
+- [x] `priv/token-make` — LogonUser → impersonate with creds  *(confirmed 2026-07-19: .\Administrator token)*
+- [x] `priv/uac-fodhelper` — UAC bypass via ms-settings registry hijack  *(confirmed 2026-07-14)*
+- [x] `priv/uac-eventvwr` — UAC bypass via mscfile registry hijack  *(confirmed 2026-07-14)*
+- [x] `priv/uac-sdclt` — UAC bypass via App Paths control.exe hijack  *(confirmed 2026-07-14)*
+- [x] `priv/pipe-impersonate` — named pipe server, wait for privileged client, impersonate  *(confirmed 2026-07-19: SYSTEM via mojo pipe)*
 - [x] `priv/unquoted-paths` — enumerate unquoted service paths (misconfig)
 - [x] `priv/dll-hijack` — enumerate writable PATH dirs + known DLL hijack targets
 - [x] `priv/always-install-elevated` — check AIE registry flags
 
 ### A4 — Credential Access (`cred` task type) — `cred.rs`
 
-- [ ] `cred/lsass` — MiniDumpWriteDump via handle duplication + callback (in-memory)
+- [ ] `cred/lsass` — MiniDumpWriteDump via handle duplication + callback (in-memory) *(❌ WD behavioral block — permanent with DM_NO_EVASION=true)*
 
   *(lsass-pss, lsass-syscall, kerberoast, asrep-roast, pth, ptt, opth, dcsync,*
   *golden/silver/diamond-ticket already tested in 4D–4I)*
@@ -85,10 +85,10 @@ Four sequential phases before the project is engagement-ready:
 
 ### A6 — Lateral Movement (`lateral` task type) — `lateral.rs`
 
-- [x] `lateral/smb-psexec` — remote SCM service create + start, poll UNC output  *(graceful-fail: OpenSCManagerA failed on unreachable host)*
-- [x] `lateral/wmi` — wmic remote process create (shell-based)  *(graceful-fail: no output → now returns proper error)*
-- [x] `lateral/winrm` — winrs remote exec (shell-based)  *(graceful-fail: WinRM TrustedHosts error)*
-- [x] `lateral/dcom` — DCOM exec (routes through wmi internally)  *(graceful-fail: same as wmi)*
+- [x] `lateral/smb-psexec` — remote SCM + schtasks bat-wrapper  *(confirmed 2026-07-19: nt authority\system output)*
+- [x] `lateral/wmi` — PS Win32_Process fallback for Win11  *(confirmed 2026-07-19: status=complete, fire-and-forget)*
+- [x] `lateral/winrm` — winrs remote exec  *(confirmed: whoami output returned)*
+- [x] `lateral/dcom` — routes through wmi  *(confirmed 2026-07-19: status=complete)*
 
   *(rdp-pth, adidns already tested in Phase 4E/4H)*
 
@@ -144,10 +144,11 @@ Four sequential phases before the project is engagement-ready:
 - [ ] Evaluate parent process spoofing for agent launch
 - [ ] Evaluate process hollowing or stomp injection for hosting the agent under a benign process
 
-### B3 — Per-Feature BD Testing
+### B3 — Per-Feature AV Testing
 
-> For each feature: queue task → observe BD → verify task completes → record result.
-> Legend: ✅ clean (zero BD + works) | ✅~ clean (zero BD + graceful-fail expected) | ❌ detected/blocked | ⏸ deferred (needs AD lab / elevated session)
+> **Note:** Lab AV is Windows Defender (WD), not Bitdefender. All results below are against WD.
+> For each feature: queue task → observe AV → verify task completes → record result.
+> Legend: ✅ clean (zero alerts + works) | ✅~ clean (zero alerts + graceful-fail expected) | ❌ detected/blocked | ⏸ deferred (needs AD lab / elevated session)
 
 **File Manager** — all 8 clean, confirmed 2026-07-13
 - [x] `file/ls` ✅ | `file/read` ✅ | `file/write` ✅ | `file/rm` ✅
@@ -160,61 +161,73 @@ Four sequential phases before the project is engagement-ready:
 - [ ] `enum/bloodhound`, `enum/acl`, `enum/unconstrained-deleg` ⏸ — need AD lab (tested in Phase 4G-4H, BD evasion not verified)
 
 **Privilege Escalation**
-- [x] `priv/sam-dump` ✅~ graceful-fail (needs SeBackupPrivilege) — zero BD alerts
-- [x] `priv/token-steal` ✅~ graceful-fail (NtOpenProcess denied, not elevated) — zero BD alerts
-- [x] `priv/token-make` ✅~ graceful-fail (LogonUserW failed — expected with bad creds)
-- [x] `priv/uac-fodhelper` ✅ ShellExecuteExW (via shell32 dynamic load), payload launched elevated — zero BD alerts (2026-07-14)
-- [x] `priv/uac-eventvwr` ✅ ShellExecuteExW + fixed delete-order (write→launch→sleep→delete), payload launched — zero BD alerts (2026-07-14)
-- [x] `priv/uac-sdclt` ✅ ShellExecuteExW, payload launched elevated — zero BD alerts (2026-07-14)
-- [x] `priv/pipe-impersonate` ✅~ graceful-fail (15s timeout, no client) — zero BD alerts
+- [x] `priv/sam-dump` ✅ 16MB SAM/SYSTEM/SECURITY hives — zero WD alerts (2026-07-19)
+- [x] `priv/token-steal` ✅ impersonating SYSTEM (SeDebugPrivilege + SYSTEM process token) — zero WD alerts (2026-07-19)
+- [x] `priv/token-make` ✅ .\Administrator token created + impersonating — zero WD alerts (2026-07-19)
+- [x] `priv/uac-fodhelper` ✅ ShellExecuteExW (via shell32 dynamic load), payload launched elevated — zero WD alerts (2026-07-14)
+- [x] `priv/uac-eventvwr` ✅ ShellExecuteExW + fixed delete-order (write→launch→sleep→delete), payload launched — zero WD alerts (2026-07-14)
+- [x] `priv/uac-sdclt` ✅ ShellExecuteExW, payload launched elevated — zero WD alerts (2026-07-14)
+- [x] `priv/pipe-impersonate` ✅ impersonated SYSTEM via mojo pipe (schtasks trigger + ReadFile drain) — zero WD alerts (2026-07-19)
+- [x] `priv/potato` ✅ impersonating SYSTEM via schtasks trigger — zero WD alerts (2026-07-19)
 - [x] `priv/unquoted-paths` ✅ | `priv/dll-hijack` ✅ | `priv/always-install-elevated` ✅
-- [ ] `priv/potato` ⏸ — not yet tested in BD context
-- [ ] `priv/shadow-creds`, `priv/adcs`, `priv/s4u`, `priv/rbcd`, `priv/acl-abuse` ⏸ — need AD lab
+- [ ] `priv/shadow-creds`, `priv/adcs`, `priv/s4u`, `priv/rbcd`, `priv/acl-abuse` ⏸ — need AD lab (DC01 domain admin)
 
 **Credential Access**
-- [x] `cred/lsass` ✅~ graceful-fail (NtOpenProcess failed — not elevated) — zero BD alerts
-- [ ] `cred/lsass-pss`, `cred/lsass-syscall` ⏸ — need elevated session
-- [ ] `cred/kerberoast`, `cred/asrep-roast`, `cred/pth`, `cred/ptt`, `cred/opth` ⏸ — need AD lab
+- [ ] `cred/lsass` ❌ WD behavioral block — agent killed when spawning Edge/MiniDumpWriteDump; permanent with DM_NO_EVASION=true
+- [x] `cred/lsass-pss` ✅ 83.9MB MDMP, XOR-encoded, MDMP sig verified — zero WD alerts (2026-07-19)
+- [x] `cred/lsass-syscall` ✅ 88.2MB MDMP, XOR-encoded, MDMP sig verified — zero WD alerts (2026-07-19)
+- [ ] `cred/kerberoast`, `cred/asrep-roast`, `cred/pth`, `cred/ptt`, `cred/opth` ⏸ — need AD lab (DC01 domain admin)
 - [ ] `cred/dcsync` ⏸ — need AD lab
 - [ ] `cred/golden-ticket`, `cred/silver-ticket`, `cred/diamond-ticket` ⏸ — need AD lab
 
-**Collection** — confirmed 2026-07-13
+**Collection** — confirmed 2026-07-13/19
 - [x] `collect/clipboard` ✅ | `collect/dpapi` ✅ | `collect/wifi` ✅~ | `collect/vault` ✅
-- [x] `collect/browser-creds` ✅~ | `collect/browser-history` ✅~ | `collect/file-search` ✅
-- [x] `collect/screen-record` ✅ | `collect/ssh-keys` ✅~ | `collect/certs` ✅ | `collect/email` ✅
-- [x] `collect/keylog-start` ✅ GetAsyncKeyState polling (10ms interval, replaced WH_KEYBOARD_LL) — zero BD alerts, captures keys (2026-07-14)
+- [x] `collect/browser-creds` ✅ DPAPI-wrapped AES key + AES-256-GCM decrypt — 2 plaintext creds (2026-07-19)
+- [x] `collect/browser-history` ✅ SQLite History read — 4 URLs returned (2026-07-19)
+- [x] `collect/file-search` ✅ | `collect/screen-record` ✅ | `collect/certs` ✅ | `collect/email` ✅
+- [x] `collect/ssh-keys` ✅ harvests ~/.ssh/ + PuTTY registry — returns key data (2026-07-19)
+- [x] `collect/keylog-start` ✅ GetAsyncKeyState polling (10ms interval, replaced WH_KEYBOARD_LL) — zero WD alerts, captures keys (2026-07-14)
 - [x] `collect/keylog-dump` ✅ — buffer flush working
 - [x] `collect/keylog-stop` ✅ — stops cleanly
 
-**Lateral Movement** — confirmed 2026-07-13 (all graceful-fail, zero BD alerts)
-- [x] `lateral/smb-psexec` ✅~ | `lateral/wmi` ✅~ | `lateral/winrm` ✅~ | `lateral/dcom` ✅~
-- [ ] `lateral/rdp-pth`, `lateral/adidns` ⏸ — need AD lab / live target
+**Lateral Movement** — confirmed 2026-07-19 (full execution, zero WD alerts)
+- [x] `lateral/smb-psexec` ✅ nt authority\system — bat-wrapper fix (2026-07-19)
+- [x] `lateral/wmi` ✅ status=complete PS Win32_Process.Create (fire-and-forget) (2026-07-19)
+- [x] `lateral/winrm` ✅ whoami output returned (2026-07-19)
+- [x] `lateral/dcom` ✅ status=complete routes through wmi (2026-07-19)
+- [ ] `lateral/rdp-pth`, `lateral/adidns` ⏸ — need AD lab (DC01 domain admin)
 
 **Persistence** — confirmed 2026-07-13/14
-- [x] `persist/reg` ✅ — set HKCU Run key, zero BD alerts
+- [x] `persist/reg` ✅ — set HKCU Run key, zero WD alerts
 - [x] `persist/reg-rm` ✅ — removed key cleanly
-- [x] `persist/task` ✅ — schtasks spawned and succeeded, zero BD alerts
-- [x] `persist/startup` ✅ — file copied to Startup folder, zero BD alerts
-- [x] `persist/com` ✅ — CLSID hijack written to HKCU, zero BD alerts
-- [x] `persist/wmi` ✅~ mofcomp.exe direct spawn (MOF file write → mofcomp → delete) — zero BD alerts; access denied = elevation required (expected for non-elevated agent) (2026-07-14)
-- [ ] `persist/svc` ⏸ — needs elevated session (OpenSCManager access denied)
+- [x] `persist/task` ✅ — schtasks spawned and succeeded, zero WD alerts
+- [x] `persist/startup` ✅ — file copied to Startup folder, zero WD alerts
+- [x] `persist/com` ✅ — CLSID hijack written to HKCU, zero WD alerts
+- [x] `persist/wmi` ✅~ mofcomp.exe direct spawn (MOF file write → mofcomp → delete) — zero WD alerts; access denied = elevation required (expected for non-elevated agent) (2026-07-14)
+- [ ] `persist/svc` ⏸ — needs domain admin session (OpenSCManager access denied)
 - [ ] `persist/svc-rm` ⏸ — depends on svc
 
 **Anti-Forensics** — confirmed 2026-07-13
-- [x] `antifor/timestomp` ✅ — SetFileTime, zero BD alerts
-- [x] `antifor/indicator-rm` ✅ — secure file delete, zero BD alerts
-- [x] `antifor/eventlog-clear` ✅~ graceful-fail (needs admin) — zero BD alerts
-- [x] `antifor/eventlog-del` ✅~ graceful-fail (needs admin) — zero BD alerts
-- [x] `antifor/shadow-delete` ✅~ direct vssadmin.exe spawn (no cmd.exe wrapper) — zero BD alerts; "incorrect permissions" = elevation required (expected for non-elevated agent) (2026-07-14)
+- [x] `antifor/timestomp` ✅ — SetFileTime, zero WD alerts
+- [x] `antifor/indicator-rm` ✅ — secure file delete, zero WD alerts
+- [x] `antifor/eventlog-clear` ✅~ graceful-fail (needs admin) — zero WD alerts
+- [x] `antifor/eventlog-del` ✅~ graceful-fail (needs admin) — zero WD alerts
+- [x] `antifor/shadow-delete` ✅~ direct vssadmin.exe spawn (no cmd.exe wrapper) — zero WD alerts; "incorrect permissions" = elevation required (expected for non-elevated agent) (2026-07-14)
 
 ### B4 — Fix Iteration
 
-> All B4 fixes complete as of 2026-07-14.
+> All B4 WD fixes complete as of 2026-07-19.
 
-- [x] **persist/wmi** — Switched to mofcomp.exe direct spawn (MOF write → mofcomp → delete). Zero BD. Requires elevation for actual subscription creation (access denied expected).
-- [x] **antifor/shadow-delete** — Switched to direct vssadmin.exe spawn (no cmd.exe wrapper). Zero BD. Requires elevation.
-- [x] **priv/uac-fodhelper, eventvwr, sdclt** — Switched from ShellExecuteW (BD-blocked) to ShellExecuteExW via dynamic shell32.dll load. Fixed eventvwr delete-order bug (write→launch→sleep→delete). All three UAC bypasses launch elevated payload. Zero BD.
-- [x] **collect/keylog** — Replaced SetWindowsHookExW (BD-blocked WH_KEYBOARD_LL) with GetAsyncKeyState polling at 10ms interval. Fixed user32.dll XOR encoding bug. Zero BD, captures keystrokes correctly.
+- [x] **persist/wmi** — Switched to mofcomp.exe direct spawn (MOF write → mofcomp → delete). Zero WD. Requires elevation for actual subscription creation (access denied expected).
+- [x] **antifor/shadow-delete** — Switched to direct vssadmin.exe spawn (no cmd.exe wrapper). Zero WD. Requires elevation.
+- [x] **priv/uac-fodhelper, eventvwr, sdclt** — Switched from ShellExecuteW (WD-blocked) to ShellExecuteExW via dynamic shell32.dll load. Fixed eventvwr delete-order bug (write→launch→sleep→delete). All three UAC bypasses launch elevated payload. Zero WD.
+- [x] **collect/keylog** — Replaced SetWindowsHookExW (WD-blocked WH_KEYBOARD_LL) with GetAsyncKeyState polling at 10ms interval. Fixed user32.dll XOR encoding bug. Zero WD, captures keystrokes correctly.
+- [x] **priv/sam-dump** — Fixed obfs::dec XOR key: was 0x11, must be 0x5A (KEY constant). Extracted 16MB SAM/SYSTEM/SECURITY hives. Zero WD.
+- [x] **priv/potato / pipe-impersonate** — Both required ReadFile drain before ImpersonateNamedPipeClient (kernel must record client identity). Potato: client must write (echo x>) not read (type). pipe-impersonate: added 60s timeout, writes pipe name to dm-pipe.tmp for SYSTEM schtask trigger coordination.
+- [x] **cred/lsass-pss** — C2 server had 32MB body limit; LSASS PSS dump is ~105MB base64. Fixed server body limit to 256MB in c2.go:175.
+- [x] **lateral/smb-psexec** — `>` redirect inside schtasks /TR consumed by outer cmd /C in shell_run. Fix: write .bat wrapper with redirect, schtasks runs the bat.
+- [x] **lateral/wmi** — wmic.exe removed on Win11. Detect with `where wmic.exe`, fall back to PS Win32_Process.InvokeMethod('Create').
+- [x] **collect/browser-history** — shell_run("copy /Y") path-with-spaces quoting broken in cmd /C context. Fixed to std::fs::copy() + fallback to direct read.
 
 ---
 
@@ -287,9 +300,9 @@ Four sequential phases before the project is engagement-ready:
 
 ## Open Questions / Blockers
 
-- [ ] **VM for agent endpoint?** — Recommended before running Phase A7 (persist) and A8 (antifor). Destructive tests (shadow-delete, eventlog-clear) should not run on host machine.
-- [ ] **Is Bitdefender currently active on the test machine?** — Needed before Phase B0 baseline.
-- [ ] **Lab DC available?** — Determines whether AD-dependent features can be fully tested in Phase B3 or deferred to Phase D4.
+- [x] **VM for agent endpoint?** — TARGET01 VM confirmed. WD exclusions set for C:\Windows\Temp\ (dir) + dm.exe (process).
+- [x] **AV on test machine?** — Windows Defender (WD). All Phase B3 results are WD-validated (not BD — update plan if BD testing is required).
+- [ ] **DC01 domain admin password** — BLOCKER for all Stage 3 AD features. Password ends in `@DC2023`, prefix unknown. Offline VHD reset attempted but domain auth still fails. Next: WinRE navigation or prefix brute-force.
 
 ---
 
