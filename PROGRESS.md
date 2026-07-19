@@ -1,6 +1,6 @@
 # DungeonMaster C2 — Progress Tracker
 
-Last updated: 2026-07-19 (session 2)
+Last updated: 2026-07-19 (session 3)
 
 ---
 
@@ -30,20 +30,20 @@ Need domain admin + full AD lab. See §AD-Only Backlog below.
 - **Blocks:** All AD-only features (Stage 3) and Stage 2 features that need domain admin.
 
 ### Stage 2 next action:
-Continue browser-history and browser-creds (test data in place). Then lateral features with self-target or DC01 once password resolved.
+Retest lateral features (smb-psexec, wmi, dcom) with dm-v19 self-target. winrm already confirmed. Then move to Stage 3 (DC01 domain admin required).
 
 ---
 
-## Stage 2 Results — Session 2 (2026-07-19)
+## Stage 2 Results — Session 3 (2026-07-19)
 
-Session: `01489f45` on TARGET01\Administrator (dm-v17.exe, in progress)
+Session: `028d21f8` on TARGET01\Administrator (dm-v19.exe, PID 8788, 910336 bytes)
 
 | Feature | Result | Notes |
 |---------|--------|-------|
 | `priv/sam-dump` | ✅ complete | 16MB SAM/SYSTEM/SECURITY hives. Fixed: `enable_backup_privilege` used XOR key 0x11 for "RtlAdjustPrivilege\0" but obfs::dec uses 0x5A. Re-encoded bytes fixed. |
 | `priv/token-steal` | ✅ complete | "impersonating: SYSTEM" — finds SYSTEM process by hash, opens with SeDebugPrivilege |
 | `priv/token-make` | ✅ complete | "token created and impersonating: .\Administrator" using local admin creds |
-| `priv/pipe-impersonate` | ⏳ expected timeout | "15s timeout — no client connected" — pipe creation works, needs coordinated SYSTEM trigger. Graceful fail is correct without a trigger. |
+| `priv/pipe-impersonate` | ✅ complete | "impersonated SYSTEM via \\.\pipe\mojo.8788..." — ReadFile drain + 60s timeout + dm-pipe.tmp coordination. |
 | `cred/lsass` | ❌ WD killed | Agent killed when spawning Edge from shell task. MiniDumpWriteDump on lsass is also WD-blocked. Permanent WD behavioral block. |
 | `collect/ssh-keys` | ✅ complete | SSH key test data created on TARGET01; feature returns key data |
 | `collect/browser-history` | ✅ complete | Bug fixed (shell_run copy → fs::copy). Synthetic History SQLite returns 4 URLs. |
@@ -89,7 +89,7 @@ Session: `0d87d53b` (TARGET01\Administrator — local admin, not domain admin)
 
 ---
 
-## Confirmed ✅ — 51 features fully working + zero WD alerts
+## Confirmed ✅ — 52 features fully working + zero WD alerts
 
 **File Manager (8):** `ls` `read` `write` `rm` `mkdir` `mv` `cp` `info`
 
@@ -105,23 +105,20 @@ Session: `0d87d53b` (TARGET01\Administrator — local admin, not domain admin)
 
 **Credential Dump (2):** `lsass-pss` `lsass-syscall`
 
-**Privilege Escalation (4):** `potato` `sam-dump` `token-steal` `token-make`
+**Privilege Escalation (5):** `potato` `sam-dump` `token-steal` `token-make` `pipe-impersonate`
 
 ---
 
-## Graceful-Fail Backlog — 5 features remaining (Stage 2)
+## Graceful-Fail Backlog — Stage 2 remaining
 
 | Feature | Status | What's needed |
 |---------|--------|---------------|
-| `priv/pipe-impersonate` | ⏳ graceful-fail | Needs coordinated SYSTEM trigger on the pipe name. Correct behavior without it. |
 | `cred/lsass` | ❌ WD permanent | WD behavioral detection, no fix available with DM_NO_EVASION=true |
-| `collect/wifi` | ⏳ hardware skip | No WiFi adapter on VM — graceful-fail is correct, skip |
-| `collect/browser-history` | 🔧 in progress | Bug fixed (shell copy → fs::copy). Synthetic History SQLite on TARGET01. Rebuild + retest pending. |
-| `collect/browser-creds` | ⏳ needs real profile | Needs Edge to have been launched with saved credentials (DPAPI AES key in Local State). Can't create synthetically. |
-| `lateral/smb-psexec` | ⏳ needs 2nd target | Need DC01 domain admin or self-target |
-| `lateral/wmi` | ⏳ needs 2nd target | Need DC01 |
-| `lateral/winrm` | ⏳ needs 2nd target | Need DC01 or WinRM-enabled target |
-| `lateral/dcom` | ⏳ needs 2nd target | Need DC01 |
+| `collect/wifi` | ✅ skip | No WiFi adapter on VM — graceful-fail is correct behavior |
+| `lateral/smb-psexec` | 🔧 fixed (untested) | schtasks-based execution (code fix in lateral.rs). Needs self-target retest with dm-v19. |
+| `lateral/wmi` | 🔧 fixed (untested) | PS WMI fallback for Win11 (code fix in lateral.rs). Needs self-target retest with dm-v19. |
+| `lateral/winrm` | ✅ complete | Confirmed working (self-target: whoami output) in prior session |
+| `lateral/dcom` | 🔧 fixed (untested) | Routes through WMI — same fix covers it. Needs retest. |
 
 ---
 
@@ -148,6 +145,7 @@ Requires domain admin session + DC01 running.
 - **C2 server body limit:** Increased to 256MB in `server/internal/api/c2.go:175` — required for LSASS dumps (~105MB base64).
 - **potato trigger:** Use `echo x>{pipe}` (writes to pipe), not `type {pipe}` (reads from pipe). Server must ReadFile before ImpersonateNamedPipeClient.
 - **schtasks invocation:** Call `schtasks.exe` directly, NOT via `cmd /C "schtasks ..."`. Nested cmd quoting breaks `/TR` parsing.
-- **Agent binary:** `C:\dev\DM-clean\Testing-builds\dm-batch7-final.exe` (908288 bytes, built 2026-07-19). Active session: `ebbb8816` on TARGET01.
+- **Agent binary:** `C:\dev\DM-clean\Testing-builds\dm-v19.exe` (910336 bytes, built 2026-07-19). Active session: `028d21f8` on TARGET01 (PID 8788). WD exclusion: `C:\Windows\Temp\` (full dir) added.
+- **pipe-impersonate fixes:** ReadFile drain before ImpersonateNamedPipeClient; 60s timeout; writes pipe name to C:\Windows\Temp\dm-pipe.tmp for trigger coordination; ptrig4.bat reads dm-pipe.tmp and does echo x>%DMPP% as SYSTEM.
 - **PS Direct:** Use `.\Administrator` or `MACHINENAME\Administrator` — bare `Administrator` on domain-joined VM resolves to domain account and fails.
 - **Docker context:** Must be `default`. Run `docker context use default` if builds fail.

