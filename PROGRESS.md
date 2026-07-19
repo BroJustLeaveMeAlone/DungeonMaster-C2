@@ -1,6 +1,6 @@
 # DungeonMaster C2 — Progress Tracker
 
-Last updated: 2026-07-19 (session 4)
+Last updated: 2026-07-19 (session 5)
 
 ---
 
@@ -30,7 +30,21 @@ Need domain admin + full AD lab. See §AD-Only Backlog below.
 - **Blocks:** All AD-only features (Stage 3) and Stage 2 features that need domain admin.
 
 ### Stage 2 — COMPLETE ✅
-All lateral features confirmed. Only `cred/lsass` permanently WD-blocked. Move to Stage 3 (DC01 domain admin required).
+All lateral + persistence features confirmed. Only `cred/lsass` permanently WD-blocked. Move to Stage 3 (DC01 domain admin required).
+
+---
+
+## Stage 2 Results — Session 5 (2026-07-19)
+
+Session: `466e71b5` on TARGET01\Administrator (dm-v20.exe, PID 3248, 912384 bytes — svc-rm API fix)
+
+| Feature | Result | Notes |
+|---------|--------|-------|
+| `persist/svc` | ✅ complete | `created service 'WinTelemetry'` — CreateServiceA via advapi32 direct load |
+| `persist/svc-rm` | ✅ complete | `deleted service 'WinTelemetry'` — fixed: replaced `sc delete` shell_run (quoting bug) with OpenService+DeleteService via API |
+
+**Root causes fixed this session:**
+- `persist/svc-rm`: `sc delete "{name}"` via `shell_run` → `cmd /C` returned error 1060 (service not found) despite service existing. Bug: cmd passes quoted argument with literal quotes to sc.exe. Fix: use `OpenServiceA` + `DeleteService` directly via advapi32 dynamic load.
 
 ---
 
@@ -101,7 +115,7 @@ Session: `0d87d53b` (TARGET01\Administrator — local admin, not domain admin)
 
 ---
 
-## Confirmed ✅ — 57 features fully working + zero WD alerts
+## Confirmed ✅ — 59 features fully working + zero WD alerts
 
 **File Manager (8):** `ls` `read` `write` `rm` `mkdir` `mv` `cp` `info`
 
@@ -120,6 +134,8 @@ Session: `0d87d53b` (TARGET01\Administrator — local admin, not domain admin)
 **Privilege Escalation (5):** `potato` `sam-dump` `token-steal` `token-make` `pipe-impersonate`
 
 **Lateral Movement (4):** `smb-psexec` `wmi` `dcom` `winrm`
+
+**Persistence (2 additional):** `svc` `svc-rm`
 
 ---
 
@@ -159,7 +175,7 @@ Requires domain admin session + DC01 running.
 - **C2 server body limit:** Increased to 256MB in `server/internal/api/c2.go:175` — required for LSASS dumps (~105MB base64).
 - **potato trigger:** Use `echo x>{pipe}` (writes to pipe), not `type {pipe}` (reads from pipe). Server must ReadFile before ImpersonateNamedPipeClient.
 - **schtasks invocation:** Call `schtasks.exe` directly, NOT via `cmd /C "schtasks ..."`. Nested cmd quoting breaks `/TR` parsing.
-- **Agent binary:** `C:\dev\DM-clean\Testing-builds\dm-v19.exe` (911360 bytes, built 2026-07-19 — bat-wrapper smb-psexec fix). Active session: `07cd1b3e` on TARGET01 (PID 4476). WD exclusion: `C:\Windows\Temp\` (full dir) added.
+- **Agent binary:** `C:\dev\DM-clean\Testing-builds\dm-v20.exe` (912384 bytes, built 2026-07-19 — svc-rm API fix). Active session: `466e71b5` on TARGET01 (PID 3248). WD exclusion: `C:\Windows\Temp\` (full dir) added.
 - **smb-psexec bat-wrapper:** `>` redirect inside schtasks /TR "cmd /c {cmd} > {out}" gets consumed by outer cmd /C in shell_run. Fix: write a .bat file containing the redirect, schtasks runs the .bat. Output captured as SYSTEM.
 - **lateral API format:** task type=`lateral`, args JSON must contain `method` field (e.g. `{"method":"smb-psexec","host":"127.0.0.1","cmd":"whoami"}`). Not `lateral/smb-psexec`.
 - **pipe-impersonate fixes:** ReadFile drain before ImpersonateNamedPipeClient; 60s timeout; writes pipe name to C:\Windows\Temp\dm-pipe.tmp for trigger coordination; ptrig4.bat reads dm-pipe.tmp and does echo x>%DMPP% as SYSTEM.

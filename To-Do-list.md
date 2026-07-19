@@ -100,7 +100,7 @@ Four sequential phases before the project is engagement-ready:
 - [x] `persist/reg-rm` — remove Run key  *(confirmed working; key removed successfully)*
 - [x] `persist/task` — create scheduled task via schtasks  *(graceful-fail: schtasks exits non-zero without elevation; error propagated correctly)*
 - [x] `persist/svc` — create + start Windows service (SCM)  *(graceful-fail: OpenSCManager returns access denied without elevation)*
-- [ ] `persist/svc-rm` — delete service  *(untested — depends on svc; defer to Phase B elevated session)*
+- [x] `persist/svc-rm` — delete service  *(confirmed 2026-07-19: deleted service 'WinTelemetry')*
 - [x] `persist/startup` — copy payload to Startup folder  *(confirmed working; file copied to Startup, cleaned up via indicator-rm)*
 - [x] `persist/com` — HKCU COM CLSID hijack (InprocServer32)  *(confirmed working; CLSID created, cleaned up via reg-rm)*
 - [x] `persist/wmi` — WMI event subscription + consumer via PowerShell  *(confirmed working; subscription created — BD killed agent before cleanup)*
@@ -204,8 +204,8 @@ Four sequential phases before the project is engagement-ready:
 - [x] `persist/startup` ✅ — file copied to Startup folder, zero WD alerts
 - [x] `persist/com` ✅ — CLSID hijack written to HKCU, zero WD alerts
 - [x] `persist/wmi` ✅~ mofcomp.exe direct spawn (MOF file write → mofcomp → delete) — zero WD alerts; access denied = elevation required (expected for non-elevated agent) (2026-07-14)
-- [ ] `persist/svc` ⏸ — needs domain admin session (OpenSCManager access denied)
-- [ ] `persist/svc-rm` ⏸ — depends on svc
+- [x] `persist/svc` ✅ CreateServiceA via advapi32 direct load — zero WD alerts (2026-07-19)
+- [x] `persist/svc-rm` ✅ OpenService+DeleteService via API (fixed shell_run quoting bug) — zero WD alerts (2026-07-19)
 
 **Anti-Forensics** — confirmed 2026-07-13
 - [x] `antifor/timestomp` ✅ — SetFileTime, zero WD alerts
