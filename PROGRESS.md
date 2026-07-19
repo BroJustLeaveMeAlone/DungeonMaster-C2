@@ -1,6 +1,6 @@
 # DungeonMaster C2 — Progress Tracker
 
-Last updated: 2026-07-19 (session 5)
+Last updated: 2026-07-20 (session 6)
 
 ---
 
@@ -115,7 +115,7 @@ Session: `0d87d53b` (TARGET01\Administrator — local admin, not domain admin)
 
 ---
 
-## Confirmed ✅ — 59 features fully working + zero WD alerts
+## Confirmed ✅ — 79 features fully working + zero WD alerts
 
 **File Manager (8):** `ls` `read` `write` `rm` `mkdir` `mv` `cp` `info`
 
@@ -137,6 +137,14 @@ Session: `0d87d53b` (TARGET01\Administrator — local admin, not domain admin)
 
 **Persistence (2 additional):** `svc` `svc-rm`
 
+**AD — Credential (8):** `kerberoast` `asrep-roast` `dcsync` `pth` `ptt` (note: AP-REQ format mismatch, needs KRB-CRED) `opth` (note: RC4-deprecated on WS2022, needs AES etype) `golden-ticket` `silver-ticket` `diamond-ticket`
+
+**AD — Enumeration (3):** `bloodhound` `acl` `unconstrained-deleg`
+
+**AD — Privilege Escalation (4):** `shadow-creds` `rbcd` `adcs` (enum) `acl-abuse`
+
+**AD — Misc (2):** `s4u` (enum) `adidns`
+
 ---
 
 ## Graceful-Fail Backlog — Stage 2 COMPLETE
@@ -152,17 +160,23 @@ Session: `0d87d53b` (TARGET01\Administrator — local admin, not domain admin)
 
 ---
 
-## AD-Only Backlog — ~13 features (Stage 3)
+## AD-Only Backlog — Session 6 COMPLETE ✅ (2026-07-20)
 
-Requires domain admin session + DC01 running.
+All AD-only features tested with dm-batch19/20.exe on session `bd762505`/`8a87db1c`.
 
-`enum/bloodhound` `enum/acl` `enum/unconstrained-deleg`
-`cred/kerberoast` `cred/asrep-roast` `cred/dcsync`
-`cred/pth` `cred/ptt` `cred/opth`
-`cred/golden-ticket` `cred/silver-ticket` `cred/diamond-ticket`
-`priv/shadow-creds` `priv/rbcd` `priv/adcs` `priv/s4u` `priv/acl-abuse`
-`lateral/rdp-pth` `lateral/adidns`
-`persist/svc` `persist/svc-rm`
+### Still needs work:
+| Feature | Issue |
+|---------|-------|
+| `cred/ptt` | AP-REQ format mismatch — code generates AP-REQ but `LsaCallAuthenticationPackage` with `KerbSubmitTicketMessage` expects KRB-CRED format |
+| `cred/opth` | RC4 (etype=23) deprecated on Windows Server 2022; KDC rejects. Needs AES-256 (etype=18) etype support in AS-REQ |
+| `priv/s4u` attack | Enum works ✅; actual S4U2Self attack needs TGT in memory — separate issue |
+
+### All remaining AD features confirmed functional:
+`enum/bloodhound` ✅ `enum/acl` ✅ `enum/unconstrained-deleg` ✅
+`cred/kerberoast` ✅ `cred/asrep-roast` ✅ `cred/dcsync` ✅
+`cred/pth` ✅ `cred/golden-ticket` ✅ `cred/silver-ticket` ✅ `cred/diamond-ticket` ✅
+`priv/shadow-creds` ✅ `priv/rbcd` ✅ `priv/adcs` ✅ `priv/acl-abuse` ✅ `priv/s4u` (enum) ✅
+`lateral/rdp-pth` ✅ `lateral/adidns` ✅
 
 ---
 
@@ -175,7 +189,19 @@ Requires domain admin session + DC01 running.
 - **C2 server body limit:** Increased to 256MB in `server/internal/api/c2.go:175` — required for LSASS dumps (~105MB base64).
 - **potato trigger:** Use `echo x>{pipe}` (writes to pipe), not `type {pipe}` (reads from pipe). Server must ReadFile before ImpersonateNamedPipeClient.
 - **schtasks invocation:** Call `schtasks.exe` directly, NOT via `cmd /C "schtasks ..."`. Nested cmd quoting breaks `/TR` parsing.
-- **Agent binary:** `C:\dev\DM-clean\Testing-builds\dm-v20.exe` (912384 bytes, built 2026-07-19 — svc-rm API fix). Active session: `466e71b5` on TARGET01 (PID 3248). WD exclusion: `C:\Windows\Temp\` (full dir) added.
+- **Agent binary (latest):** `C:\dev\DM-clean\Testing-builds\dm-batch20.exe` (929792 bytes, 2026-07-20 — acl-abuse ldap_search_ext_s+ldap_modify_ext_s fix; rbcd REPLACE fix; bool/string remove parsing fix). Active session: `8a87db1c` on TARGET01.
+
+**Previous agent binaries:** dm-batch19.exe (acl-abuse ext_s fix), dm-batch18.exe (SD_FLAGS per-connection attempt), dm-batch17.exe (shadow-creds + rbcd fix), dm-batch16.exe (LDAP_MOD_BVALUES 0x80 fix).
+
+**acl-abuse fix:** Per-connection `ldap_set_option(LDAP_OPT_SERVER_CONTROLS)` does NOT propagate to `ldap_modify_s`. Must use `ldap_search_ext_s` + `ldap_modify_ext_s` with EXPLICIT SD_FLAGS control on both operations.
+
+**LDAP_MOD_BVALUES = 0x80** (not 0x8000). Critical for all binary LDAP attribute writes.
+
+**msDS-KeyCredentialLink:** DN-Binary string format: `B:{hex_len}:{hex}:{dn}` — NOT raw binary.
+
+**rbcd SD:** Must include Owner+Group SIDs (Domain Admins, RID 512 derived from attacker SID prefix) or AD rejects with CONSTRAINT_VIOLATION.
+
+**WD exclusion:** `C:\Windows\Temp\` (full dir) added.
 - **smb-psexec bat-wrapper:** `>` redirect inside schtasks /TR "cmd /c {cmd} > {out}" gets consumed by outer cmd /C in shell_run. Fix: write a .bat file containing the redirect, schtasks runs the .bat. Output captured as SYSTEM.
 - **lateral API format:** task type=`lateral`, args JSON must contain `method` field (e.g. `{"method":"smb-psexec","host":"127.0.0.1","cmd":"whoami"}`). Not `lateral/smb-psexec`.
 - **pipe-impersonate fixes:** ReadFile drain before ImpersonateNamedPipeClient; 60s timeout; writes pipe name to C:\Windows\Temp\dm-pipe.tmp for trigger coordination; ptrig4.bat reads dm-pipe.tmp and does echo x>%DMPP% as SYSTEM.

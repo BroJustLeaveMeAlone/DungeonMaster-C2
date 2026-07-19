@@ -27,12 +27,12 @@
 | VM | Account | Password | Status |
 |----|---------|----------|--------|
 | DM-TARGET01 | `.\Administrator` or `TARGET01\Administrator` | `Mr.president2009` | ✅ Verified 2026-07-18 |
-| DM-DC01 | `AMITLAB\Administrator` | unknown — original ends in `@DC2023`, reset attempts inconclusive | ⚠ Unresolved |
+| DM-DC01 | `AMITLAB\Administrator` | `LabAdmin@DC2024!` | ✅ Verified 2026-07-19 (PS Direct confirmed) |
 
 > **CRITICAL: On domain-joined machines, bare `Administrator` resolves to the domain account, not local.**
 > Always use `.\Administrator` or `MACHINENAME\Administrator` for local account PS Direct.
 
-**DC01 note:** DC01 has no local SAM — all accounts are domain (AMITLAB.local). Domain admin password is unknown. Pending resolution.
+**DC01 note:** DC01 has no local SAM — all accounts are domain (AMITLAB.local). Domain admin password: `LabAdmin@DC2024!` (from autounattend.xml, carried through DC promo).
 
 **Domain:** `AMITLAB.local`
 **DC hostname:** `DC01.AMITLAB.local`
@@ -60,7 +60,7 @@ docker rm tmp-dm
 
 **Default build args (wrong for lab):** DM_C2_HOST=127.0.0.1, DM_SLEEP_SECS=30 — always override.
 
-**Current agent:** `C:\dev\DM-clean\Testing-builds\dm-batch7-final.exe` — 908288 bytes, built 2026-07-19.
+**Current agent:** `C:\dev\DM-clean\Testing-builds\dm-batch20.exe` — 929792 bytes, built 2026-07-20 (acl-abuse ext_s + rbcd REPLACE + bool remove parsing fix).
 
 **C2 server body limit:** `server/internal/api/c2.go:175` — 256MB (was 32MB; LSASS dumps are ~105MB base64).
 

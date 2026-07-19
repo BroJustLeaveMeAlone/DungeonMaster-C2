@@ -714,7 +714,7 @@ fn wldap_load() -> Result<usize, String> {
 // Queries LDAP and returns Vec of (dn, Vec<(attr_name, Vec<String>)>).
 // Binary attributes are returned as "HEX:<hex>" strings.
 #[cfg(target_os = "windows")]
-fn ldap_enum(wldap: usize, dc: &str, base_dn: &str, filter: &str, attrs: &[&str])
+fn ldap_enum(wldap: usize, dc: &str, base_dn: &str, filter: &str, attrs: &[&str], user: Option<&str>, pass: Option<&str>)
     -> Result<Vec<(String, Vec<(String, Vec<String>)>)>, String>
 {
     type LdapInitFn    = unsafe extern "system" fn(*const u8, u32) -> *mut u8;
@@ -761,7 +761,14 @@ fn ldap_enum(wldap: usize, dc: &str, base_dn: &str, filter: &str, attrs: &[&str]
     if ld.is_null() { return Err("ldap_init failed".into()); }
     let ver: u32 = 3;
     unsafe { fn_setopt(ld, 0x11, &ver as *const u32 as *const u8) };
-    let br = unsafe { fn_bind(ld, core::ptr::null(), core::ptr::null(), 0x0486) };
+    let user_b: Vec<u8> = match user { Some(u) => u.bytes().chain(core::iter::once(0u8)).collect(), None => vec![0u8] };
+    let pass_b: Vec<u8> = match pass { Some(p) => p.bytes().chain(core::iter::once(0u8)).collect(), None => vec![0u8] };
+    let (u_ptr, p_ptr, auth_meth): (*const u8, *const u8, u32) = if user.is_some() {
+        (user_b.as_ptr(), pass_b.as_ptr(), 0x80)
+    } else {
+        (core::ptr::null(), core::ptr::null(), 0x0486)
+    };
+    let br = unsafe { fn_bind(ld, u_ptr, p_ptr, auth_meth) };
     if br != 0 { unsafe { fn_unbind(ld) }; return Err(format!("ldap_bind: {br:#x}")); }
 
     let base_b:   Vec<u8> = base_dn.bytes().chain(core::iter::once(0u8)).collect();
@@ -859,6 +866,10 @@ fn enum_bloodhound(v: &serde_json::Value) -> TaskOutput {
         Err(e) => return TaskOutput::failure(&format!("bloodhound: {e}")),
     };
 
+    let bind_user = v.get("user").and_then(|s| s.as_str())
+        .map(|u| format!("{}\\{}", domain_fqdn.split('.').next().unwrap_or("").to_uppercase(), u));
+    let bind_pass = v.get("pass").and_then(|s| s.as_str()).map(|s| s.to_string());
+
     let objs_to_json = |objs: Vec<(String, Vec<(String, Vec<String>)>)>| -> Vec<serde_json::Value> {
         objs.into_iter().map(|(dn, attrs)| {
             let mut m = serde_json::json!({"dn": dn});
@@ -871,48 +882,51 @@ fn enum_bloodhound(v: &serde_json::Value) -> TaskOutput {
         }).collect()
     };
 
+    let bu = bind_user.as_deref();
+    let bp = bind_pass.as_deref();
+
     // Users
     let users = ldap_enum(wldap, &dc, &base_dn,
         "(&(objectClass=user)(!objectClass=computer))",
         &["sAMAccountName","distinguishedName","userAccountControl","adminCount",
-          "memberOf","lastLogon","pwdLastSet","servicePrincipalName","description"])
+          "memberOf","lastLogon","pwdLastSet","servicePrincipalName","description"], bu, bp)
         .map(objs_to_json).unwrap_or_default();
 
     // Computers
     let computers = ldap_enum(wldap, &dc, &base_dn,
         "(objectClass=computer)",
         &["sAMAccountName","distinguishedName","dNSHostName","operatingSystem",
-          "operatingSystemVersion","userAccountControl","lastLogon"])
+          "operatingSystemVersion","userAccountControl","lastLogon"], bu, bp)
         .map(objs_to_json).unwrap_or_default();
 
     // Groups
     let groups = ldap_enum(wldap, &dc, &base_dn,
         "(objectClass=group)",
-        &["sAMAccountName","distinguishedName","member","adminCount","groupType","description"])
+        &["sAMAccountName","distinguishedName","member","adminCount","groupType","description"], bu, bp)
         .map(objs_to_json).unwrap_or_default();
 
     // Domain trusts
     let trusts = ldap_enum(wldap, &dc, &base_dn,
         "(objectClass=trustedDomain)",
-        &["flatName","trustPartner","trustType","trustAttributes","trustDirection"])
+        &["flatName","trustPartner","trustType","trustAttributes","trustDirection"], bu, bp)
         .map(objs_to_json).unwrap_or_default();
 
     // Domain info
     let domain_info = ldap_enum(wldap, &dc, &base_dn,
         "(objectClass=domain)",
-        &["dc","objectSid","msDS-Behavior-Version","lockoutThreshold","minPwdLength"])
+        &["dc","objectSid","msDS-Behavior-Version","lockoutThreshold","minPwdLength"], bu, bp)
         .map(objs_to_json).unwrap_or_default();
 
     // GPO objects
     let gpos = ldap_enum(wldap, &dc, &base_dn,
         "(objectClass=groupPolicyContainer)",
-        &["displayName","gPCFileSysPath","flags","versionNumber"])
+        &["displayName","gPCFileSysPath","flags","versionNumber"], bu, bp)
         .map(objs_to_json).unwrap_or_default();
 
     // Enrollment Services (CAs)
     let cas = ldap_enum(wldap, &dc, &config_dn,
         "(objectClass=pKIEnrollmentService)",
-        &["cn","dNSHostName","certificateTemplates","cACertificate"])
+        &["cn","dNSHostName","certificateTemplates","cACertificate"], bu, bp)
         .map(objs_to_json).unwrap_or_default();
 
     let result = serde_json::json!({
@@ -970,6 +984,10 @@ fn enum_acl(v: &serde_json::Value) -> TaskOutput {
         Err(e) => return TaskOutput::failure(&format!("acl: {e}")),
     };
 
+    let bind_user = v.get("user").and_then(|s| s.as_str())
+        .map(|u| format!("{}\\{}", domain_fqdn.split('.').next().unwrap_or("").to_uppercase(), u));
+    let bind_pass = v.get("pass").and_then(|s| s.as_str()).map(|s| s.to_string());
+
     let mut all_acls: Vec<serde_json::Value> = Vec::new();
 
     for (label, filter) in &targets {
@@ -979,7 +997,7 @@ fn enum_acl(v: &serde_json::Value) -> TaskOutput {
             base_dn.clone()
         };
 
-        let objs = match ldap_enum(wldap, &dc, &search_base, filter, &["distinguishedName","nTSecurityDescriptor","cn","sAMAccountName"]) {
+        let objs = match ldap_enum(wldap, &dc, &search_base, filter, &["distinguishedName","nTSecurityDescriptor","cn","sAMAccountName"], bind_user.as_deref(), bind_pass.as_deref()) {
             Ok(r) => r,
             Err(_) => continue,
         };
@@ -1179,13 +1197,17 @@ fn enum_unconstrained_deleg(v: &serde_json::Value) -> TaskOutput {
         Err(e) => return TaskOutput::failure(&format!("unconstrained-deleg: {e}")),
     };
 
+    let bind_user = v.get("user").and_then(|s| s.as_str())
+        .map(|u| format!("{}\\{}", domain_fqdn.split('.').next().unwrap_or("").to_uppercase(), u));
+    let bind_pass = v.get("pass").and_then(|s| s.as_str()).map(|s| s.to_string());
+
     // UAC flag: TRUSTED_FOR_DELEGATION = 0x80000 (524288)
     // Filter: computers + users with unconstrained delegation (excluding krbtgt)
     let filter_comps = "(userAccountControl:1.2.840.113556.1.4.803:=524288)";
     let attrs = ["sAMAccountName","distinguishedName","userAccountControl",
                  "operatingSystem","dNSHostName","servicePrincipalName"];
 
-    let objects = match ldap_enum(wldap, &dc, &base_dn, filter_comps, &attrs) {
+    let objects = match ldap_enum(wldap, &dc, &base_dn, filter_comps, &attrs, bind_user.as_deref(), bind_pass.as_deref()) {
         Ok(r) => r,
         Err(e) => return TaskOutput::failure(&format!("unconstrained-deleg: {e}")),
     };
