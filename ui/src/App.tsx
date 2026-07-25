@@ -6,6 +6,7 @@ import { DashboardPage }from './pages/DashboardPage'
 import { SessionPage }  from './pages/SessionPage'
 import { CampaignPage } from './pages/CampaignPage'
 import { BuildPage }    from './pages/BuildPage'
+import { ManualPage }   from './pages/ManualPage'
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -40,6 +41,7 @@ function AuthGuard() {
       <Route path="/campaigns/:id/sessions/:sessionId"    element={<SessionPage />} />
       <Route path="/sessions/:sessionId"                  element={<SessionPage />} />
       <Route path="/builds"                               element={<BuildPage />} />
+      <Route path="/manual"                               element={<ManualPage />} />
       <Route path="*"                         element={<Navigate to="/" replace />} />
     </Routes>
   )
