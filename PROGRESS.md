@@ -1,6 +1,6 @@
 # DungeonMaster C2 — Progress Tracker
 
-Last updated: 2026-07-25 (session 9)
+Last updated: 2026-07-26 (session 10)
 
 ---
 
@@ -8,9 +8,9 @@ Last updated: 2026-07-25 (session 9)
 
 **Active phase:** B3 — Per-feature WD evasion testing
 
-**`cred/ptt` and `cred/opth` are now fully end-to-end functional (session 9 confirms domain access). See §Session 9 Results.**
+**Session 10 complete:** USER-MANUAL.md fully rewritten — all 75+ task methods documented with args tables, output formats, and attack chain examples. Committed and pushed (6b769ea).
 
-**Next:** folder rename task (clarify which directory), then continue B3 per-feature WD testing.
+**Next:** Continue B3 per-feature WD evasion testing.
 
 ---
 
