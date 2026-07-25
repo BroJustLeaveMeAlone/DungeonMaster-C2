@@ -430,7 +430,7 @@ func makeAgentBuildArgs(imageTag, cargoTarget, binName, c2Host, c2Port,
 
 	args := []string{
 		"build",
-		"-f", "/workspace/deploy/docker/Dockerfile.agent",
+		"-f", "/workspace/infra/docker/Dockerfile.agent",
 		"--build-arg", "DM_TARGET=" + cargoTarget,
 		"--build-arg", "DM_BIN=" + binName,
 		"--build-arg", "DM_C2_HOST=" + c2Host,

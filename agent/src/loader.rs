@@ -205,6 +205,8 @@ pub unsafe fn get_export_by_name(dll_base: usize, fn_name: *const u8) -> Option<
     if *(base.add(opt) as *const u16) != 0x020B { return None; } // PE32+ only
     let exp_rva  = *(base.add(opt + 112) as *const u32) as usize;
     if exp_rva == 0 { return None; }
+    // Export directory size (DataDirectory[0].Size at opt+116) — used to detect forwarders
+    let exp_size = *(base.add(opt + 116) as *const u32) as usize;
 
     let ed         = base.add(exp_rva);
     let num_names  = *(ed.add(0x18) as *const u32) as usize;
@@ -230,7 +232,10 @@ pub unsafe fn get_export_by_name(dll_base: usize, fn_name: *const u8) -> Option<
             if ok {
                 let idx = *ords.add(i) as usize;
                 let fn_rva = *funcs.add(idx) as usize;
-                if fn_rva != 0 { return Some(base.add(fn_rva)); }
+                // Forwarder: RVA falls inside the export directory itself → skip
+                if fn_rva != 0 && !(fn_rva >= exp_rva && fn_rva < exp_rva + exp_size) {
+                    return Some(base.add(fn_rva));
+                }
             }
         }
     }

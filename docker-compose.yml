@@ -50,7 +50,7 @@ services:
   server:
     build:
       context: ./server
-      dockerfile: ../deploy/docker/Dockerfile.server
+      dockerfile: ../infra/docker/Dockerfile.server
     restart: unless-stopped
     depends_on:
       postgres: { condition: service_healthy }
@@ -76,16 +76,16 @@ services:
       - "8080:8080"   # operator REST API
       - "4443:4443"   # C2 listener (agent callbacks)
     volumes:
-      - ./tls:/certs:ro
+      - ./certs:/certs:ro
       - /var/run/docker.sock:/var/run/docker.sock
-      - ./deploy:/workspace/deploy:ro
+      - ./infra:/workspace/infra:ro
       - ./agent:/workspace/agent:ro
       - build_artifacts:/artifacts
 
-  ai:
+  ttp-ranker:
     build:
-      context: ./ai
-      dockerfile: ../deploy/docker/Dockerfile.ai
+      context: ./ttp-ranker
+      dockerfile: ../infra/docker/Dockerfile.ai
     restart: unless-stopped
     depends_on:
       - server
@@ -100,7 +100,7 @@ services:
   ui:
     build:
       context: ./ui
-      dockerfile: ../deploy/docker/Dockerfile.ui
+      dockerfile: ../infra/docker/Dockerfile.ui
     restart: unless-stopped
     depends_on:
       - server

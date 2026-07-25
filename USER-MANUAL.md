@@ -190,10 +190,10 @@ Roles: `operator` (standard access), `admin` (full access including operator man
 
 ### TLS certificates
 
-The stack ships with a self-signed 10-year certificate in `tls/server.crt` / `tls/server.key`. The C2 listener (`server` container, port 4443) uses this cert. Development agents are built with `DM_TLS_SKIP_VERIFY=true` to accept it.
+The stack ships with a self-signed 10-year certificate in `certs/server.crt` / `certs/server.key`. The C2 listener (`server` container, port 4443) uses this cert. Development agents are built with `DM_TLS_SKIP_VERIFY=true` to accept it.
 
 For production:
-- Replace `tls/server.crt` and `tls/server.key` with a valid certificate before deploying.
+- Replace `certs/server.crt` and `certs/server.key` with a valid certificate before deploying.
 - Build agents with `DM_TLS_SKIP_VERIFY=false` (the default) and, optionally, pin the certificate SHA256 in the agent build config (planned feature).
 
 ### Redirector setup
@@ -811,7 +811,7 @@ The server marks sessions stale when they miss `5 × sleep_seconds` without a he
 2. Common causes:
    - **Docker socket not mounted:** The server container requires `/var/run/docker.sock` mounted. Verify in `docker-compose.yml` — the `server` service has `- /var/run/docker.sock:/var/run/docker.sock`.
    - **Build volume name mismatch:** The artifacts volume name must match `${COMPOSE_PROJECT_NAME:-dungeonmaster}_build_artifacts`. Check `docker volume ls`.
-   - **Workspace not mounted:** The Dockerfile for the agent is resolved from `/workspace/deploy/docker/Dockerfile.agent`. The server has `- .:/workspace:ro` in its volumes.
+   - **Workspace not mounted:** The Dockerfile for the agent is resolved from `/workspace/infra/docker/Dockerfile.agent`. The server has `- .:/workspace:ro` in its volumes.
    - **Network issues pulling Rust base image:** The builder uses `rust:1.86-alpine`. Ensure the host has internet access when the build runs for the first time to pull this image.
 
 3. Re-run the build after fixing the issue. Each build attempt creates a new record.
@@ -826,10 +826,10 @@ The server marks sessions stale when they miss `5 × sleep_seconds` without a he
    ```
    Expected: `server.crt` and `server.key`.
 
-2. Check that `tls/server.crt` and `tls/server.key` exist on the host (they are in the repository). If deleted, regenerate:
+2. Check that `certs/server.crt` and `certs/server.key` exist on the host (they are in the repository). If deleted, regenerate:
    ```
-   openssl req -x509 -newkey rsa:4096 -keyout tls/server.key \
-     -out tls/server.crt -days 3650 -nodes \
+   openssl req -x509 -newkey rsa:4096 -keyout certs/server.key \
+     -out certs/server.crt -days 3650 -nodes \
      -subj "/CN=dungeonmaster"
    ```
    Then restart: `docker compose restart server`.

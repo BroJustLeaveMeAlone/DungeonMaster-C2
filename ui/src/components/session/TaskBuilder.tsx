@@ -100,12 +100,16 @@ const SCHEMA: CategoryDef[] = [
         { key: 'cmd',  label: 'Command to spawn',  type: 'text',     placeholder: 'cmd.exe' },
       ]},
       { method: 'ptt',            label: 'Pass the Ticket',      desc: 'Inject Kerberos ticket into current session', args: [
-        { key: 'ticket', label: 'Base64 ticket (.kirbi)', type: 'textarea', required: true },
+        { key: 'ticket_b64', label: 'Base64 ticket (.kirbi)', type: 'textarea', required: true },
+        { key: 'purge',      label: 'Purge existing tickets first', type: 'select', options: ['false','true'], default: 'false' },
       ]},
-      { method: 'opth',           label: 'Overpass the Hash',    desc: 'Convert NTLM hash → Kerberos TGT', args: [
-        { key: 'user',   label: 'Username', type: 'text', required: true },
-        { key: 'hash',   label: 'NTLM hash', type: 'text', required: true },
-        { key: 'domain', label: 'Domain',   type: 'text', required: true },
+      { method: 'opth',           label: 'Overpass the Hash',    desc: 'Convert NTLM hash → Kerberos TGT and inject into session', args: [
+        { key: 'user',        label: 'Username',                   type: 'text', required: true },
+        { key: 'ntlm',        label: 'NTLM hash (32-char hex)',    type: 'text', required: true },
+        { key: 'domain',      label: 'Domain (FQDN)',              type: 'text', required: true },
+        { key: 'dc',          label: 'DC hostname/IP (optional)',   type: 'text', placeholder: '10.10.10.2' },
+        { key: 'aes256_key',  label: 'AES-256 key (64-char hex, optional)', type: 'text', placeholder: 'for WS2022 w/ RC4 disabled' },
+        { key: 'cmd',         label: 'Run after inject (optional)', type: 'text', placeholder: 'dir \\\\DC01\\C$' },
       ]},
       { method: 'dcsync',         label: 'DCSync',               desc: 'Replicate credentials from DC via DRSUAPI', args: [
         { key: 'user',   label: 'Target user (blank = all)', type: 'text', placeholder: 'krbtgt' },

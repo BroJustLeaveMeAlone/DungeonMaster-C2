@@ -1,6 +1,6 @@
 # DungeonMaster C2 — Progress Tracker
 
-Last updated: 2026-07-20 (session 6)
+Last updated: 2026-07-25 (session 9)
 
 ---
 
@@ -8,7 +8,41 @@ Last updated: 2026-07-20 (session 6)
 
 **Active phase:** B3 — Per-feature WD evasion testing
 
-**Active work order (sequential):**
+**`cred/ptt` and `cred/opth` are now fully end-to-end functional (session 9 confirms domain access). See §Session 9 Results.**
+
+**Next:** folder rename task (clarify which directory), then continue B3 per-feature WD testing.
+
+---
+
+## Session 9 Results (2026-07-25) — cred/opth end-to-end domain access confirmed
+
+Agent: `dm-batch33.exe` (942592 bytes). Session `2322c04a` on TARGET01\Administrator.
+
+| Feature | Result | Notes |
+|---------|--------|-------|
+| `cred/opth` + cmd | ✅ complete | `dir \\DC01.AMITLAB.LOCAL\C$` returns full DC directory listing. Domain access confirmed end-to-end. |
+
+**Root cause of prior cmd failure:** `spawn_opth_cmd` created a child process via `CreateProcessWithLogonW(LOGON_NETCREDENTIALS_ONLY)` and tried to inject the TGT into the child's LUID via `lsa_privileged_inject_ticket`. The injection result was silently discarded (`let _ = ...`). The child ran with fake password "x" and fell back to NTLM → "The user name or password is incorrect."
+
+**Fix (batch33):** `cred_ptt` already injects the TGT into the agent's current logon session. Replaced `spawn_opth_cmd` with `std::process::Command::new("cmd").args(["/C", cmd])`. Child inherits the parent's logon session, which now has the TGT. Kerberos gets a TGS for `cifs/DC01.AMITLAB.LOCAL` and access succeeds.
+
+---
+
+## Session 7–8 Results (2026-07-21) — cred/ptt + cred/opth fixed
+
+Agent: `dm-batch28.exe` (944640 bytes). Session on TARGET01\Administrator.
+
+| Feature | Result | Notes |
+|---------|--------|-------|
+| `cred/ptt` | ✅ complete | Switched from AP-REQ to KRB-CRED format (APPLICATION 22 / KerbSubmitTicketMessage type 21). klist confirms 1 cached ticket after injection. |
+| `cred/opth` | ✅ complete | RC4-HMAC AS-REQ/AS-REP exchange with DC. Session key extracted from enc-part (RC4 decrypt, key usage 3/8). EncKrbCredPart (APPLICATION 29) built correctly with session key in KrbCredInfo[0]. TGT injected via cred_ptt. klist confirms `Administrator @ AMITLAB.LOCAL`. UI has all fields including optional `cmd`. |
+
+**Fixes applied (sessions 7–8):**
+- `cred/ptt`: Was generating AP-REQ; Windows `KerbSubmitTicketMessage` expects KRB-CRED (.kirbi format). Rewrote `build_kerb_cred` to produce APPLICATION 22 with APPLICATION 29 EncKrbCredPart.
+- `cred/opth`: Added `rc4_hmac_decrypt` to extract session key from AS-REP enc-part. Added `extract_session_key_from_as_rep`. Rewrote `build_kerb_cred_from_as_rep` to include session key in KrbCredInfo[0] (required for Windows to accept the injected ticket).
+- UI: `cmd` field added to TaskBuilder.tsx opth schema.
+
+---
 
 ### Stage 1 — Batch-7 ✅ COMPLETE (2026-07-19)
 lsass-pss, lsass-syscall, potato all fixed and verified on dm-batch7-final.exe.
@@ -137,7 +171,7 @@ Session: `0d87d53b` (TARGET01\Administrator — local admin, not domain admin)
 
 **Persistence (2 additional):** `svc` `svc-rm`
 
-**AD — Credential (8):** `kerberoast` `asrep-roast` `dcsync` `pth` `ptt` (note: AP-REQ format mismatch, needs KRB-CRED) `opth` (note: RC4-deprecated on WS2022, needs AES etype) `golden-ticket` `silver-ticket` `diamond-ticket`
+**AD — Credential (8):** `kerberoast` `asrep-roast` `dcsync` `pth` `ptt` ✅ `opth` ✅ `golden-ticket` `silver-ticket` `diamond-ticket`
 
 **AD — Enumeration (3):** `bloodhound` `acl` `unconstrained-deleg`
 
@@ -167,8 +201,8 @@ All AD-only features tested with dm-batch19/20.exe on session `bd762505`/`8a87db
 ### Still needs work:
 | Feature | Issue |
 |---------|-------|
-| `cred/ptt` | AP-REQ format mismatch — code generates AP-REQ but `LsaCallAuthenticationPackage` with `KerbSubmitTicketMessage` expects KRB-CRED format |
-| `cred/opth` | RC4 (etype=23) deprecated on Windows Server 2022; KDC rejects. Needs AES-256 (etype=18) etype support in AS-REQ |
+| `cred/ptt` | ✅ FIXED (sessions 7–8) — KRB-CRED format, klist confirmed |
+| `cred/opth` | ✅ FIXED (sessions 7–8) — TGT obtained + injected, klist confirmed |
 | `priv/s4u` attack | Enum works ✅; actual S4U2Self attack needs TGT in memory — separate issue |
 
 ### All remaining AD features confirmed functional:
@@ -189,7 +223,7 @@ All AD-only features tested with dm-batch19/20.exe on session `bd762505`/`8a87db
 - **C2 server body limit:** Increased to 256MB in `server/internal/api/c2.go:175` — required for LSASS dumps (~105MB base64).
 - **potato trigger:** Use `echo x>{pipe}` (writes to pipe), not `type {pipe}` (reads from pipe). Server must ReadFile before ImpersonateNamedPipeClient.
 - **schtasks invocation:** Call `schtasks.exe` directly, NOT via `cmd /C "schtasks ..."`. Nested cmd quoting breaks `/TR` parsing.
-- **Agent binary (latest):** `C:\dev\DM-clean\Testing-builds\dm-batch20.exe` (929792 bytes, 2026-07-20 — acl-abuse ldap_search_ext_s+ldap_modify_ext_s fix; rbcd REPLACE fix; bool/string remove parsing fix). Active session: `8a87db1c` on TARGET01.
+- **Agent binary (latest):** `C:\dev\DM-clean\lab-builds\dm-batch33.exe` (942592 bytes, 2026-07-25 — opth cmd runs directly in current session after TGT injection). Active session: `2322c04a` on TARGET01.
 
 **Previous agent binaries:** dm-batch19.exe (acl-abuse ext_s fix), dm-batch18.exe (SD_FLAGS per-connection attempt), dm-batch17.exe (shadow-creds + rbcd fix), dm-batch16.exe (LDAP_MOD_BVALUES 0x80 fix).
 

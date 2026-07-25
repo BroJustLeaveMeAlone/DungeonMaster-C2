@@ -33,7 +33,7 @@ A modular, operator-first command-and-control framework built for authorized red
 |-----------|-------|-------------|
 | `server/` | Go 1.22 | REST + gRPC operator API, C2 listener (HTTPS + TCP), session lifecycle, collab bus |
 | `agent/` | Rust (no_std-friendly) | Implant: ECDH key exchange, AES-GCM task encryption, multi-transport channels (HTTPS/TCP/SMB), sleep encryption, Linux musl target |
-| `ai/` | Python / FastAPI | TTP suggestion engine, evasion advisor, report generator (Claude API) |
+| `ttp-ranker/` | Python / FastAPI | TTP suggestion engine, evasion advisor, report generator (Claude API) |
 | `ui/` | React + TypeScript | Operator console: session list, xterm.js shell, live event feed, MITRE heatmap |
 | `redirector/` | nginx | Traffic filtering, domain-fronting support, agent callback forwarding |
 
@@ -93,7 +93,7 @@ All runtime config is environment-variable driven. The key ones:
 | `DM_GRPC_ADDR` | `:50051` | gRPC service port |
 | `DM_C2_ADDR` | `:4443` | HTTPS C2 listener (agent callbacks, TLS 1.3) |
 | `DM_TCP_C2_ADDR` | *(unset = disabled)* | Raw TCP C2 listener — e.g. `:4444` |
-| `DM_TLS_CERT` / `DM_TLS_KEY` | `tls/server.crt/.key` | TLS cert for HTTPS C2 |
+| `DM_TLS_CERT` / `DM_TLS_KEY` | `certs/server.crt/.key` | TLS cert for HTTPS C2 |
 | `DM_TOTP_DISABLED` | `false` | Set `true` to bypass TOTP enforcement (dev only) |
 | `DM_C2_PATH_REG` | `/r` | Override agent registration path (malleable profiles) |
 | `DM_C2_PATH_POLL` | `/c` | Override agent poll/callback path (malleable profiles) |

