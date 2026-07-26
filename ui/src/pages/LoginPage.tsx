@@ -15,7 +15,7 @@ export function LoginPage() {
     setLoading(true)
     setError('')
     try {
-      const base = import.meta.env.VITE_API_URL ?? 'http://localhost:8080'
+      const base = import.meta.env.VITE_API_URL ?? ''
       const { data } = await axios.post(`${base}/api/v1/auth/login`, form)
       setTokens(data.access_token, data.refresh_token, {
         id:       data.operator_id,

@@ -2,7 +2,7 @@ import axios from 'axios'
 import { useAuthStore } from '../store/auth'
 
 export const api = axios.create({
-  baseURL: import.meta.env.VITE_API_URL ?? 'http://localhost:8080',
+  baseURL: import.meta.env.VITE_API_URL ?? '',
   timeout: 30_000,
 })
 
@@ -49,7 +49,7 @@ api.interceptors.response.use(
 // browsers cannot set Authorization headers on EventSource connections.
 export function campaignEventSource(campaignId: string): EventSource {
   const token = useAuthStore.getState().accessToken ?? ''
-  const base  = import.meta.env.VITE_API_URL ?? 'http://localhost:8080'
+  const base  = import.meta.env.VITE_API_URL ?? ''
   return new EventSource(
     `${base}/api/v1/events?campaign_id=${encodeURIComponent(campaignId)}&token=${encodeURIComponent(token)}`,
   )
