@@ -99,8 +99,8 @@ services:
 
   ui:
     build:
-      context: ./ui
-      dockerfile: ../infra/docker/Dockerfile.ui
+      context: .
+      dockerfile: infra/docker/Dockerfile.ui
     restart: unless-stopped
     depends_on:
       - server

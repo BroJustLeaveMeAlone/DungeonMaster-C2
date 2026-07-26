@@ -1,0 +1,8 @@
+agent/target
+ui/node_modules
+ui/.vite
+ui/dist
+lab-builds
+*.exe
+*.pdb
+.git
