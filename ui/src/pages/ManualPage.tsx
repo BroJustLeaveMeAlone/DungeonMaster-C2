@@ -51,6 +51,14 @@ export function ManualPage() {
             >
               Manual
             </Link>
+            <Link
+              to="/lure-gen"
+              style={{ color: 'var(--dm-text-mid)', fontSize: '0.72rem', letterSpacing: '0.08em', textDecoration: 'none', transition: 'color 0.1s' }}
+              onMouseEnter={e => (e.currentTarget.style.color = 'var(--dm-text-hi)')}
+              onMouseLeave={e => (e.currentTarget.style.color = 'var(--dm-text-mid)')}
+            >
+              Lure Gen
+            </Link>
           </div>
         </div>
       </nav>
