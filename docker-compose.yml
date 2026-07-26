@@ -72,6 +72,7 @@ services:
       DM_MINIO_SECRET_KEY:  ${DM_MINIO_SECRET_KEY}
       DM_BUILD_VOLUME:      "${COMPOSE_PROJECT_NAME:-dungeonmaster}_build_artifacts"
       DM_TOTP_DISABLED:     "${DM_TOTP_DISABLED:-false}"
+      DM_REG_KEY:           "${DM_REG_KEY:-}"
     ports:
       - "8080:8080"   # operator REST API
       - "4443:4443"   # C2 listener (agent callbacks)

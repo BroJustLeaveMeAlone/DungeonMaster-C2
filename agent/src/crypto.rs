@@ -79,6 +79,51 @@ pub fn decrypt(key: &[u8; 32], data: &[u8]) -> Result<Vec<u8>, CryptoError> {
     cipher.decrypt(nonce, ciphertext).map_err(|_| CryptoError::Decrypt)
 }
 
+const REG_KEY_HEX: &str = env!("DM_REG_KEY");
+
+const fn all_zero_hex(s: &str) -> bool {
+    let b = s.as_bytes();
+    if b.len() != 64 { return true; }
+    let mut i = 0;
+    while i < 64 {
+        if b[i] != b'0' { return false; }
+        i += 1;
+    }
+    true
+}
+
+const fn hex_nibble(b: u8) -> u8 {
+    match b {
+        b'0'..=b'9' => b - b'0',
+        b'a'..=b'f' => b - b'a' + 10,
+        b'A'..=b'F' => b - b'A' + 10,
+        _ => 0,
+    }
+}
+
+const fn decode_key_hex(s: &str) -> [u8; 32] {
+    let bytes = s.as_bytes();
+    let mut out = [0u8; 32];
+    let mut i = 0;
+    while i < 32 {
+        out[i] = (hex_nibble(bytes[i * 2]) << 4) | hex_nibble(bytes[i * 2 + 1]);
+        i += 1;
+    }
+    out
+}
+
+const REG_KEY_ACTIVE: bool = !all_zero_hex(REG_KEY_HEX);
+const REG_KEY: [u8; 32] = decode_key_hex(REG_KEY_HEX);
+
+/// Encrypts the registration payload with the compiled-in AES-256-GCM key.
+/// Returns plaintext unchanged when the key is all zeros (dev/lab mode).
+pub fn encrypt_reg_payload(plaintext: &[u8]) -> Vec<u8> {
+    if !REG_KEY_ACTIVE {
+        return plaintext.to_vec();
+    }
+    encrypt(&REG_KEY, plaintext).unwrap_or_else(|_| plaintext.to_vec())
+}
+
 #[derive(Debug)]
 pub enum CryptoError {
     InvalidKey,

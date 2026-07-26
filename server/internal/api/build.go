@@ -451,6 +451,9 @@ func makeAgentBuildArgs(imageTag, cargoTarget, binName, c2Host, c2Port,
 	if campaignID != "" && campaignID != "00000000-0000-0000-0000-000000000000" {
 		args = append(args, "--build-arg", "DM_CAMPAIGN_ID="+campaignID)
 	}
+	if regKey := os.Getenv("DM_REG_KEY"); regKey != "" {
+		args = append(args, "--build-arg", "DM_REG_KEY="+regKey)
+	}
 	args = append(args, "-t", imageTag, "/workspace")
 	return args
 }

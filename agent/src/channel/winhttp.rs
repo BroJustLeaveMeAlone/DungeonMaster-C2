@@ -199,8 +199,9 @@ impl Channel for WinHttpChannel {
         req:  &RegisterRequest,
         path: &str,
     ) -> Result<RegisterResponse, ChannelError> {
-        let body = serde_json::to_vec(req)
+        let json = serde_json::to_vec(req)
             .map_err(|e| ChannelError::Parse(e.to_string()))?;
+        let body = crate::crypto::encrypt_reg_payload(&json);
 
         let hdrs = format!(
             "Content-Type: application/octet-stream\r\nX-Request-ID: {}\r\n",

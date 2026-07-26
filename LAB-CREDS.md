@@ -39,6 +39,18 @@
 
 ---
 
+## Registration Key (DM_REG_KEY)
+
+AES-256-GCM pre-shared key baked into agents at build time. Server reads from `.env`.
+
+```
+DM_REG_KEY=83f2f0eef4d91ee6ef311ef4938a8bb461410c65e7868b1ec2c34237dd5900d1
+```
+
+All zeros = dev/plaintext mode (backward compat). Current key is active in `.env`.
+
+---
+
 ## Agent Build (Docker)
 
 ```powershell
@@ -50,6 +62,7 @@ docker build -f infra/docker/Dockerfile.agent `
   --build-arg DM_TLS_SKIP_VERIFY=true `
   --build-arg DM_SLEEP_SECS=5 `
   --build-arg DM_NO_EVASION=true `
+  --build-arg DM_REG_KEY=83f2f0eef4d91ee6ef311ef4938a8bb461410c65e7868b1ec2c34237dd5900d1 `
   -t dm-agent:lab .
 
 docker rm -f tmp-dm 2>$null

@@ -1,16 +1,34 @@
 # DungeonMaster C2 — Progress Tracker
 
-Last updated: 2026-07-26 (session 10)
+Last updated: 2026-07-27 (session 11)
 
 ---
 
 ## Current Status
 
-**Active phase:** B3 — Per-feature WD evasion testing
+**Active phase:** External testing setup
 
-**Session 10 complete:** USER-MANUAL.md fully rewritten — all 75+ task methods documented with args tables, output formats, and attack chain examples. Committed and pushed (6b769ea).
+**Session 11 complete:**
+- `DM_REG_KEY` implemented: AES-256-GCM registration payload encryption across full stack
+  - Agent: `encrypt_reg_payload()` in `crypto.rs`; `winhttp.rs` + `https.rs` `register()` updated
+  - Server: `c2.go` decrypts on registration; returns 404 (silent) on failure
+  - Build: `build.go` passes `DM_REG_KEY` to Docker `--build-arg`; `docker-compose.yml` injects env var
+  - Dockerfile: `ARG DM_REG_KEY` declared; `COPY deploy/pe_patch.py` bug fixed to `infra/pe_patch.py`
+  - `.env` + `LAB-CREDS.md` updated with active key
+  - End-to-end test: host agent (`dm-regkey-test.exe`) checked in — encrypted registration verified
+- Key: `83f2f0eef4d91ee6ef311ef4938a8bb461410c65e7868b1ec2c34237dd5900d1` (in `.env` and `LAB-CREDS.md`)
 
-**Next:** Continue B3 per-feature WD evasion testing.
+**Next:** Set up external connectivity (ngrok or redirector VPS), set listener Callback Host to public address, build new agent with that address, test session from outside local network.
+
+---
+
+## Session 10 (2026-07-26)
+
+**USER-MANUAL.md fully rewritten** — all 75+ task methods documented with args tables, output formats, and attack chain examples. Committed and pushed (6b769ea).
+
+**Lure Gen page** added at `/lure-gen` (iframe to localhost:8000 with health check).
+
+**"No active campaigns" bug fixed** — API base URL was hardcoded to `localhost:8080` in `client.ts`/`LoginPage.tsx`; changed to `''` (relative, via nginx proxy).
 
 ---
 

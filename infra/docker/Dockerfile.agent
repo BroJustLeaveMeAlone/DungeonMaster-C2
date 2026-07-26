@@ -20,7 +20,7 @@ RUN rustup target add x86_64-pc-windows-gnu x86_64-unknown-linux-musl
 
 WORKDIR /build
 COPY agent/ .
-COPY deploy/pe_patch.py /deploy/pe_patch.py
+COPY infra/pe_patch.py /deploy/pe_patch.py
 
 ARG DM_TARGET=x86_64-pc-windows-gnu
 ARG DM_BIN=dm-agent.exe
@@ -48,6 +48,7 @@ ARG DM_PACK_STAGER=false
 ARG DM_SIGN_SUBJECT=
 # Set to true when dll-sideload feature is requested — compiles as cdylib instead of bin.
 ARG DM_DLL_BUILD=false
+ARG DM_REG_KEY=0000000000000000000000000000000000000000000000000000000000000000
 
 ENV DM_TARGET=$DM_TARGET \
     DM_BIN=$DM_BIN \
