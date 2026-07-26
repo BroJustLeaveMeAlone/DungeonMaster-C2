@@ -1,7 +1,30 @@
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { Link } from 'react-router-dom'
+import type { Components } from 'react-markdown'
 import content from '../../../USER-MANUAL.md?raw'
+
+function slugify(text: string): string {
+  return String(text)
+    .toLowerCase()
+    .replace(/[^\w\s-]/g, '')
+    .replace(/ /g, '-')
+}
+
+function heading(level: 1 | 2 | 3 | 4 | 5 | 6): Components['h1'] {
+  const Tag = `h${level}` as 'h1' | 'h2' | 'h3' | 'h4' | 'h5' | 'h6'
+  return function H({ children }) {
+    const text = typeof children === 'string' ? children
+      : Array.isArray(children) ? children.map(c => (typeof c === 'string' ? c : '')).join('') : ''
+    const id = slugify(text)
+    return <Tag id={id} style={{ scrollMarginTop: '48px' }}>{children}</Tag>
+  }
+}
+
+const MD_COMPONENTS: Components = {
+  h1: heading(1), h2: heading(2), h3: heading(3),
+  h4: heading(4), h5: heading(5), h6: heading(6),
+}
 
 export function ManualPage() {
   return (
@@ -34,7 +57,7 @@ export function ManualPage() {
 
       <div className="flex-1 px-8 py-8 max-w-5xl mx-auto w-full">
         <div className="dm-manual-body">
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>
+          <ReactMarkdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>
             {content}
           </ReactMarkdown>
         </div>
