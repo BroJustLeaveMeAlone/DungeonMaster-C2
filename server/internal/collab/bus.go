@@ -73,8 +73,28 @@ func NewBus(rdb *redis.Client, log *zap.Logger) *Bus {
 
 // Start begins listening on all campaign channels.
 // This must be called once at server startup; run it in a goroutine.
+// It automatically reconnects if the Redis channel closes.
 func (b *Bus) Start(ctx context.Context) error {
-	// Subscribe to the wildcard pattern for all campaign channels
+	backoff := time.Second
+	for {
+		err := b.subscribe(ctx)
+		if err == nil {
+			return nil // clean shutdown via ctx
+		}
+		b.log.Warn("collab: redis pubsub disconnected, reconnecting",
+			zap.Error(err), zap.Duration("backoff", backoff))
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(backoff):
+		}
+		if backoff < 30*time.Second {
+			backoff *= 2
+		}
+	}
+}
+
+func (b *Bus) subscribe(ctx context.Context) error {
 	pubsub := b.rdb.PSubscribe(ctx, channelPrefix+"*")
 	defer pubsub.Close()
 
@@ -88,7 +108,7 @@ func (b *Bus) Start(ctx context.Context) error {
 			return nil
 		case msg, ok := <-ch:
 			if !ok {
-				return fmt.Errorf("collab: redis channel closed")
+				return fmt.Errorf("redis channel closed")
 			}
 			var ev Event
 			if err := json.Unmarshal([]byte(msg.Payload), &ev); err != nil {

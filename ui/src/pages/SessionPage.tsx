@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '../api/client'
@@ -33,6 +33,14 @@ interface Session {
   last_seen:      string
 }
 
+function relativeTime(iso: string): string {
+  const diff = (Date.now() - new Date(iso).getTime()) / 1000
+  if (diff < 60) return `${Math.floor(diff)}s ago`
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`
+  return `${Math.floor(diff / 86400)}d ago`
+}
+
 const PERSIST_METHODS_TRACKED = new Set(['reg', 'task', 'svc', 'startup', 'com', 'wmi'])
 
 export function SessionPage() {
@@ -43,6 +51,8 @@ export function SessionPage() {
   const [richOutputs,     setRichOutputs]     = useState<RichContent[]>([])
   const [showTaskBuilder, setShowTaskBuilder] = useState(false)
   const [persistEntries,  setPersistEntries]  = useState<PersistEntry[]>([])
+  const [revokeConfirm, setRevokeConfirm]     = useState(false)
+  const [relTime, setRelTime]                 = useState('')
 
   const { queueTask, pollOutput } = useTaskQueue(sessionId ?? '')
 
@@ -58,6 +68,16 @@ export function SessionPage() {
       api.post(`/api/v1/sessions/${sessionId}/revoke`, { reason }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['session', sessionId] }),
   })
+
+  useEffect(() => {
+    if (!session?.last_seen) return
+    function update() {
+      setRelTime(relativeTime(session!.last_seen))
+    }
+    update()
+    const id = setInterval(update, 15_000)
+    return () => clearInterval(id)
+  }, [session?.last_seen])
 
   function addRichOutput(c: RichContent) {
     setRichOutputs(prev => [...prev, c])
@@ -142,6 +162,12 @@ export function SessionPage() {
           }}
         />
 
+        {relTime && (
+          <span style={{ color: 'var(--dm-text-lo)', fontSize: '0.68rem', flexShrink: 0 }}>
+            {relTime}
+          </span>
+        )}
+
         <span style={{ color: 'var(--dm-text-hi)', fontWeight: 700, fontSize: '0.84rem', flexShrink: 0 }}>
           {session.hostname}
         </span>
@@ -177,17 +203,33 @@ export function SessionPage() {
         </span>
 
         {!session.is_revoked && (
-          <button
-            className="dm-action dm-danger"
-            style={{ fontSize: '0.68rem', letterSpacing: '0.06em' }}
-            onClick={() => {
-              if (confirm('Revoke this session? The agent will self-destruct on next check-in.')) {
-                revoke.mutate('operator-revoked')
-              }
-            }}
-          >
-            Revoke
-          </button>
+          revokeConfirm ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', flexShrink: 0 }}>
+              <span style={{ color: 'var(--dm-amber)', fontSize: '0.72rem' }}>Revoke session?</span>
+              <button
+                className="dm-action dm-danger"
+                style={{ fontSize: '0.68rem', letterSpacing: '0.06em' }}
+                onClick={() => { revoke.mutate('operator-revoked'); setRevokeConfirm(false) }}
+              >
+                Confirm
+              </button>
+              <button
+                className="dm-action"
+                style={{ fontSize: '0.68rem', letterSpacing: '0.06em' }}
+                onClick={() => setRevokeConfirm(false)}
+              >
+                Cancel
+              </button>
+            </div>
+          ) : (
+            <button
+              className="dm-action dm-danger"
+              style={{ fontSize: '0.68rem', letterSpacing: '0.06em' }}
+              onClick={() => setRevokeConfirm(true)}
+            >
+              Revoke
+            </button>
+          )
         )}
       </div>
 

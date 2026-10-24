@@ -387,6 +387,7 @@ export function TaskBuilder({ onSubmit, onClose }: Props) {
   const [catIdx,    setCatIdx]    = useState(0)
   const [methodIdx, setMethodIdx] = useState(0)
   const [values,    setValues]    = useState<Record<string, string>>({})
+  const [validErr,  setValidErr]  = useState('')
 
   const cat    = SCHEMA[catIdx]
   const method = cat.methods[methodIdx]
@@ -400,6 +401,7 @@ export function TaskBuilder({ onSubmit, onClose }: Props) {
   function selectMethod(i: number) {
     setMethodIdx(i)
     setValues({})
+    setValidErr('')
   }
 
   function setValue(key: string, val: string) {
@@ -409,9 +411,10 @@ export function TaskBuilder({ onSubmit, onClose }: Props) {
   function submit() {
     const missing = method.args.filter(a => a.required && !values[a.key]?.trim() && !a.default)
     if (missing.length > 0) {
-      alert(`Required: ${missing.map(a => a.label).join(', ')}`)
+      setValidErr(`Required: ${missing.map(a => a.label).join(', ')}`)
       return
     }
+    setValidErr('')
     const args: Record<string, unknown> = { method: method.method }
     for (const a of method.args) {
       const v = values[a.key] ?? a.default ?? ''
@@ -579,7 +582,12 @@ export function TaskBuilder({ onSubmit, onClose }: Props) {
           <span style={{ color: 'var(--dm-text-lo)', fontSize: '0.68rem', fontFamily: 'Consolas, monospace' }}>
             {cat.type}/{method.method}
           </span>
-          <div className="flex gap-2">
+          <div className="flex items-center gap-2" style={{ flex: 1, justifyContent: 'flex-end' }}>
+            {validErr && (
+              <span style={{ color: 'var(--dm-red)', fontSize: '0.72rem', marginRight: '0.5rem' }}>
+                ✕ {validErr}
+              </span>
+            )}
             <button
               className="dm-action"
               onClick={onClose}

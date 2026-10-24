@@ -1,303 +1,419 @@
 import { useState } from 'react'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
-import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query'
 import { api } from '../api/client'
 
-interface Campaign { id: string; name: string }
-interface Listener { id: string; name: string; bind_host: string; bind_port: number; callback_host?: string; type: string }
-
-const LISTENER_INIT = { name: '', bind_host: '0.0.0.0', bind_port: 4443, callback_host: '', type: 'https' }
 interface Build {
-  id:            string
-  campaign_id?:  string
-  status:        'queued' | 'building' | 'complete' | 'failed'
-  target_os:     string
-  target_arch:   string
-  artifact_url?: string
-  sha256?:       string
-  created_at:    string
-  completed_at?: string
+  id:           string
+  campaign_id:  string
+  status:       string
+  target_os:    string
+  target_arch:  string
+  artifact_url: string
+  sha256:       string
+  created_at:   string
+  completed_at: string | null
 }
 
-const STATUS_COLOR: Record<string, string> = {
-  queued:   'var(--dm-amber)',
-  building: 'var(--dm-blue)',
-  complete: 'var(--dm-accent)',
-  failed:   'var(--dm-red)',
+interface Listener {
+  id:        string
+  name:      string
+  bind_host: string
+  bind_port: number
+  type:      string
 }
 
-const FEATURE_GROUPS: { label: string; features: [string, string][] }[] = [
-  {
-    label: 'Process Injection',
-    features: [
-      ['inject-classic', 'Classic thread injection'],
-      ['inject-apc',     'Early-bird APC injection'],
-      ['inject-hollow',  'Process hollowing'],
-      ['inject-hijack',  'Thread hijacking'],
-      ['inject-stomp',   'Module stomping'],
-    ],
-  },
-  {
-    label: 'Evasion',
-    features: [
-      ['ppid-spoof',   'PPID spoofing'],
-      ['unhook',       'ntdll unhooking'],
-      ['heap-encrypt', 'Heap sleep masking'],
-      ['stack-spoof',  'Stack spoofing'],
-    ],
-  },
-  {
-    label: 'Loader / Lifecycle',
-    features: [
-      ['udrl',           'Reflective loader (UDRL)'],
-      ['process-hollow', 'Hollow into trusted process (requires udrl)'],
-      ['dll-sideload',   'DLL sideloading — compiles as version.dll for signed-EXE bundle'],
-      ['self-delete',    'Agent self-delete on cleanup'],
-    ],
-  },
+interface Profile {
+  name:      string
+  poll_path: string
+}
+
+interface Campaign {
+  id:   string
+  name: string
+}
+
+const FEATURE_OPTIONS = [
+  { id: 'inject-apc',     label: 'APC Injection',     group: 'Inject' },
+  { id: 'inject-classic', label: 'Classic Inject',    group: 'Inject' },
+  { id: 'inject-hollow',  label: 'Hollow',            group: 'Inject' },
+  { id: 'inject-hijack',  label: 'Thread Hijack',     group: 'Inject' },
+  { id: 'inject-stomp',   label: 'Module Stomp',      group: 'Inject' },
+  { id: 'process-hollow', label: 'Process Hollow',    group: 'Inject' },
+  { id: 'dll-sideload',   label: 'DLL Sideload',      group: 'Inject' },
+  { id: 'unhook',         label: 'NTDLL Unhook',      group: 'Evasion' },
+  { id: 'ppid-spoof',     label: 'PPID Spoof',        group: 'Evasion' },
+  { id: 'heap-encrypt',   label: 'Heap Encrypt',      group: 'Evasion' },
+  { id: 'stack-spoof',    label: 'Stack Spoof',       group: 'Evasion' },
+  { id: 'sleep-encrypt',  label: 'Sleep Encrypt',     group: 'Evasion' },
+  { id: 'udrl',           label: 'uDRL',              group: 'Loader' },
+  { id: 'self-delete',    label: 'Self-Delete',       group: 'Loader' },
+  { id: 'channel-tcp',    label: 'TCP Channel',       group: 'Channel' },
+  { id: 'channel-smb',    label: 'SMB Channel',       group: 'Channel' },
 ]
 
-const INITIAL = {
-  campaign_id:     '',
-  listener_id:     '',
-  target_os:       'windows',
-  target_arch:     'x64',
-  sleep_seconds:   30,
-  jitter_pct:      20,
-  ephemeral:       true,
-  tls_skip_verify: true,
-  sign_subject:    '',
-  features:        [] as string[],
+const FORM_INIT = {
+  campaign_id:    '',
+  listener_id:    '',
+  profile_name:   '',
+  target_os:      'windows',
+  target_arch:    'x64',
+  sleep_seconds:  30,
+  jitter_pct:     20,
+  tls_skip_verify: false,
+  sleep_encrypt:  false,
+  ephemeral:      false,
+  sign_subject:   '',
+  features:       [] as string[],
 }
-type FormState = typeof INITIAL
+
+const DELIVER_FORMATS: Record<string, string[]> = {
+  windows: ['hta', 'ps1', 'js'],
+  linux:   ['sh'],
+  macos:   ['app', 'sh'],
+}
+
+function statusColor(s: string) {
+  if (s === 'complete')  return 'var(--dm-accent)'
+  if (s === 'failed')    return 'var(--dm-red)'
+  if (s === 'building')  return 'var(--dm-amber)'
+  return 'var(--dm-text-lo)'
+}
+
+function statusLabel(s: string) {
+  if (s === 'complete') return '● DONE'
+  if (s === 'failed')   return '✕ FAILED'
+  if (s === 'building') return '⟳ BUILDING'
+  return '◌ QUEUED'
+}
 
 export function BuildPage() {
-  const [form, setForm]               = useState<FormState>(INITIAL)
-  const [building, setBuilding]       = useState(false)
-  const [lastBuildId, setLastBuildId] = useState('')
-  const [error, setError]             = useState('')
-  const [showNewListener, setShowNewListener] = useState(false)
-  const [listenerForm, setListenerForm]       = useState(LISTENER_INIT)
-  const [listenerError, setListenerError]     = useState('')
   const qc = useQueryClient()
+  const [showForm, setShowForm]     = useState(false)
+  const [form, setForm]             = useState(FORM_INIT)
+  const [createError, setCreateError] = useState('')
+  const [deliverOpen, setDeliverOpen] = useState<string | null>(null)
 
-  const createListener = useMutation({
-    mutationFn: (data: typeof LISTENER_INIT) => api.post('/api/v1/listeners', data).then(r => r.data),
-    onSuccess: (created: Listener) => {
-      void qc.invalidateQueries({ queryKey: ['listeners'] })
-      setForm(f => ({ ...f, listener_id: created.id }))
-      setShowNewListener(false)
-      setListenerForm(LISTENER_INIT)
-      setListenerError('')
+  const { data: builds = [] } = useQuery<Build[]>({
+    queryKey: ['builds'],
+    queryFn:  () => api.get('/api/v1/builds').then(r => r.data),
+    refetchInterval: (query) => {
+      const data = query.state.data as Build[] | undefined
+      if (!data) return 5_000
+      return data.some(b => b.status === 'pending' || b.status === 'building') ? 3_000 : 15_000
     },
-    onError: (err: unknown) => {
-      const msg = (err as { response?: { data?: { error?: string } } })?.response?.data?.error
-      setListenerError(msg ?? 'Create listener failed')
-    },
+  })
+
+  const { data: listeners = [] } = useQuery<Listener[]>({
+    queryKey: ['listeners'],
+    queryFn:  () => api.get('/api/v1/listeners').then(r => r.data),
+  })
+
+  const { data: profiles = [] } = useQuery<Profile[]>({
+    queryKey: ['profiles'],
+    queryFn:  () => api.get('/api/v1/profiles').then(r => r.data),
   })
 
   const { data: campaigns = [] } = useQuery<Campaign[]>({
     queryKey: ['campaigns'],
     queryFn:  () => api.get('/api/v1/campaigns?active_only=true').then(r => r.data),
   })
-  const { data: listeners = [] } = useQuery<Listener[]>({
-    queryKey: ['listeners'],
-    queryFn:  () => api.get('/api/v1/listeners').then(r => r.data),
-  })
-  const { data: builds = [] } = useQuery<Build[]>({
-    queryKey:        ['builds'],
-    queryFn:         () => api.get('/api/v1/builds').then(r => r.data),
-    refetchInterval: 5_000,
+
+  const createBuild = useMutation({
+    mutationFn: () => api.post('/api/v1/builds', { config: form }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['builds'] })
+      setShowForm(false)
+      setForm(FORM_INIT)
+      setCreateError('')
+    },
+    onError: (err: unknown) => {
+      const msg = (err as { response?: { data?: { error?: string } } })?.response?.data?.error
+      setCreateError(msg ?? 'Build request failed')
+    },
   })
 
-  const campaignMap = Object.fromEntries(campaigns.map(c => [c.id, c.name]))
-
-  function toggleFeature(feat: string) {
+  function toggleFeature(id: string) {
     setForm(f => ({
       ...f,
-      features: f.features.includes(feat)
-        ? f.features.filter(x => x !== feat)
-        : [...f.features, feat],
+      features: f.features.includes(id)
+        ? f.features.filter(x => x !== id)
+        : [...f.features, id],
     }))
   }
 
-  async function downloadWrap(buildId: string, format: 'hta' | 'ps1' | 'js') {
-    try {
-      const res = await api.get(`/api/v1/builds/${buildId}/deliver?format=${format}`, { responseType: 'blob' })
-      const url = URL.createObjectURL(res.data)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = `update.${format}`
-      a.click()
-      URL.revokeObjectURL(url)
-    } catch (err: unknown) {
-      const data = (err as { response?: { data?: unknown } })?.response?.data
-      if (data instanceof Blob) {
-        try {
-          const json = JSON.parse(await data.text())
-          setError(json.error ?? `Failed to download ${format}`)
-        } catch {
-          setError(`Failed to download ${format}`)
-        }
-      } else {
-        setError((data as { error?: string })?.error ?? `Failed to download ${format}`)
-      }
-    }
+  function handleSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    setCreateError('')
+    if (!form.listener_id) { setCreateError('Select a listener'); return }
+    createBuild.mutate()
   }
 
-  async function handleBuild(e: React.FormEvent) {
-    e.preventDefault()
-    setBuilding(true)
-    setError('')
-    setLastBuildId('')
-    try {
-      const { data } = await api.post<Build>('/api/v1/builds', { config: form })
-      setLastBuildId(data.id)
-      void qc.invalidateQueries({ queryKey: ['builds'] })
-    } catch (err: unknown) {
-      const msg = (err as { response?: { data?: { error?: string } } })?.response?.data?.error
-      setError(msg ?? 'Build request failed')
-    } finally {
-      setBuilding(false)
-    }
+  function deliverURL(buildId: string, fmt: string) {
+    return `/api/v1/builds/${buildId}/deliver?format=${fmt}`
   }
+
+  const featureGroups = FEATURE_OPTIONS.reduce<Record<string, typeof FEATURE_OPTIONS>>((acc, f) => {
+    if (!acc[f.group]) acc[f.group] = []
+    acc[f.group].push(f)
+    return acc
+  }, {})
 
   return (
     <div className="min-h-screen flex flex-col" style={{ background: 'var(--dm-bg)' }}>
 
-      {/* Header */}
-      <div
-        className="flex items-center gap-4 px-6 py-2.5"
-        style={{ borderBottom: '1px solid var(--dm-border)', borderTop: '2px solid var(--dm-accent-lo)' }}
-      >
-        <Link
-          to="/"
-          style={{ color: 'var(--dm-text-lo)', fontSize: '0.72rem', textDecoration: 'none', transition: 'color 0.1s' }}
-          onMouseEnter={e => (e.currentTarget.style.color = 'var(--dm-text-mid)')}
-          onMouseLeave={e => (e.currentTarget.style.color = 'var(--dm-text-lo)')}
-        >
-          ← dashboard
-        </Link>
-        <span style={{ color: 'var(--dm-text-lo)' }}>|</span>
-        <span style={{ color: 'var(--dm-text-hi)', fontWeight: 700, fontSize: '0.82rem', letterSpacing: '0.12em' }}>
-          PAYLOAD BUILDER
-        </span>
+      <nav style={{ borderBottom: '1px solid var(--dm-border)', borderTop: '2px solid var(--dm-accent-lo)' }}>
+        <div className="flex items-center justify-between px-6 py-2.5">
+          <div className="flex items-center gap-4">
+            <Link
+              to="/"
+              style={{ color: 'var(--dm-text-lo)', fontSize: '0.7rem', textDecoration: 'none', transition: 'color 0.1s' }}
+              onMouseEnter={e => (e.currentTarget.style.color = 'var(--dm-text-mid)')}
+              onMouseLeave={e => (e.currentTarget.style.color = 'var(--dm-text-lo)')}
+            >
+              ← DUNGEONMASTER
+            </Link>
+            <span style={{ color: 'var(--dm-text-lo)', fontSize: '0.7rem' }}>/</span>
+            <span style={{ color: 'var(--dm-text-hi)', fontWeight: 700, fontSize: '0.82rem', letterSpacing: '0.2em' }}>
+              BUILDS
+            </span>
+          </div>
+          <button
+            onClick={() => { setShowForm(true); setCreateError('') }}
+            className="dm-btn"
+            style={{ fontSize: '0.68rem' }}
+          >
+            + New Build
+          </button>
+        </div>
+      </nav>
+
+      <div className="flex-1 p-6">
+        <div style={{ background: 'var(--dm-surface)', border: '1px solid var(--dm-border)' }}>
+          <table className="w-full" style={{ borderCollapse: 'collapse' }}>
+            <thead>
+              <tr style={{ borderBottom: '1px solid var(--dm-border)' }}>
+                {['Status', 'Target', 'SHA256', 'Created', 'Actions'].map(h => (
+                  <th key={h} style={{
+                    textAlign: 'left',
+                    fontWeight: 400,
+                    fontSize: '0.6rem',
+                    letterSpacing: '0.15em',
+                    textTransform: 'uppercase',
+                    color: 'var(--dm-text-lo)',
+                    padding: '0.5rem 1rem',
+                  }}>
+                    {h}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {builds.length === 0 ? (
+                <tr>
+                  <td colSpan={5} style={{ padding: '1.5rem 1rem', color: 'var(--dm-text-lo)', fontSize: '0.78rem', textAlign: 'center' }}>
+                    No builds yet.
+                  </td>
+                </tr>
+              ) : builds.map((b, i) => (
+                <tr key={b.id} style={{ borderTop: i > 0 ? '1px solid var(--dm-border)' : undefined }}>
+                  <td style={{ padding: '0.6rem 1rem' }}>
+                    <span style={{ color: statusColor(b.status), fontSize: '0.72rem', fontWeight: 600, letterSpacing: '0.08em' }}>
+                      {statusLabel(b.status)}
+                    </span>
+                  </td>
+                  <td style={{ padding: '0.6rem 1rem', color: 'var(--dm-text-mid)', fontSize: '0.78rem' }}>
+                    {b.target_os}/{b.target_arch}
+                  </td>
+                  <td style={{ padding: '0.6rem 1rem', color: 'var(--dm-text-lo)', fontSize: '0.68rem', fontFamily: 'monospace' }}>
+                    {b.sha256 ? b.sha256.slice(0, 12) + '…' : '—'}
+                  </td>
+                  <td style={{ padding: '0.6rem 1rem', color: 'var(--dm-text-lo)', fontSize: '0.72rem' }}>
+                    {new Date(b.created_at).toLocaleString()}
+                  </td>
+                  <td style={{ padding: '0.6rem 1rem' }}>
+                    {b.status === 'complete' && (
+                      <div className="flex items-center gap-3">
+                        {b.artifact_url && (
+                          <a
+                            href={b.artifact_url}
+                            target="_blank"
+                            rel="noreferrer"
+                            style={{ color: 'var(--dm-accent-lo)', fontSize: '0.72rem', textDecoration: 'none', transition: 'color 0.1s' }}
+                            onMouseEnter={e => (e.currentTarget.style.color = 'var(--dm-accent)')}
+                            onMouseLeave={e => (e.currentTarget.style.color = 'var(--dm-accent-lo)')}
+                          >
+                            ↓ artifact
+                          </a>
+                        )}
+                        <div style={{ position: 'relative' }}>
+                          <button
+                            className="dm-action"
+                            style={{ fontSize: '0.68rem' }}
+                            onClick={() => setDeliverOpen(deliverOpen === b.id ? null : b.id)}
+                          >
+                            deliver ▾
+                          </button>
+                          {deliverOpen === b.id && (
+                            <div style={{
+                              position: 'absolute',
+                              right: 0,
+                              top: '100%',
+                              marginTop: '4px',
+                              background: 'var(--dm-surface)',
+                              border: '1px solid var(--dm-border)',
+                              zIndex: 50,
+                              minWidth: '90px',
+                            }}>
+                              {(DELIVER_FORMATS[b.target_os] ?? ['hta']).map(fmt => (
+                                <a
+                                  key={fmt}
+                                  href={deliverURL(b.id, fmt)}
+                                  download
+                                  onClick={() => setDeliverOpen(null)}
+                                  style={{
+                                    display: 'block',
+                                    padding: '0.35rem 0.75rem',
+                                    color: 'var(--dm-text-mid)',
+                                    fontSize: '0.72rem',
+                                    textDecoration: 'none',
+                                    letterSpacing: '0.06em',
+                                    transition: 'background 0.1s, color 0.1s',
+                                  }}
+                                  onMouseEnter={e => {
+                                    e.currentTarget.style.background = 'var(--dm-border)'
+                                    e.currentTarget.style.color = 'var(--dm-text-hi)'
+                                  }}
+                                  onMouseLeave={e => {
+                                    e.currentTarget.style.background = ''
+                                    e.currentTarget.style.color = 'var(--dm-text-mid)'
+                                  }}
+                                >
+                                  .{fmt}
+                                </a>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       </div>
 
-      <div className="flex flex-col lg:flex-row gap-0 flex-1 min-h-0 overflow-auto">
-
-        {/* ── Config panel ─────────────────────────────────── */}
+      {showForm && (
         <div
-          className="flex-shrink-0 overflow-y-auto"
-          style={{ width: '100%', maxWidth: '420px', borderRight: '1px solid var(--dm-border)' }}
+          className="fixed inset-0 z-50 flex items-start justify-center"
+          style={{ background: 'rgba(0,0,0,0.82)', overflowY: 'auto', padding: '2rem 1rem' }}
+          onClick={e => { if (e.target === e.currentTarget) setShowForm(false) }}
         >
-          <form onSubmit={handleBuild}>
-            {/* Notifications */}
-            {(error || lastBuildId) && (
-              <div style={{ padding: '0.75rem 1.25rem', borderBottom: '1px solid var(--dm-border)' }}>
-                {error && (
-                  <div style={{
-                    color: 'var(--dm-red)',
-                    background: 'var(--dm-red-bg)',
-                    border: '1px solid rgba(255,58,76,0.25)',
-                    padding: '0.45rem 0.7rem',
-                    fontSize: '0.75rem',
-                  }}>
-                    ✕&nbsp;&nbsp;{error}
-                  </div>
-                )}
-                {lastBuildId && (
-                  <div style={{
-                    color: 'var(--dm-accent)',
-                    background: 'var(--dm-accent-bg)',
-                    border: '1px solid rgba(0,212,176,0.2)',
-                    padding: '0.45rem 0.7rem',
-                    fontSize: '0.75rem',
-                  }}>
-                    ✓&nbsp;&nbsp;Build queued —&nbsp;
-                    <span style={{ color: 'var(--dm-text-mid)', fontSize: '0.68rem' }}>{lastBuildId}</span>
-                  </div>
-                )}
-              </div>
-            )}
+          <div className="w-full max-w-lg dm-panel" style={{ borderTop: '2px solid var(--dm-accent-lo)' }}>
+            <div className="flex items-center justify-between px-5 py-2.5" style={{ borderBottom: '1px solid var(--dm-border)' }}>
+              <span className="dm-section" style={{ flex: 1 }}>New Build</span>
+              <button onClick={() => setShowForm(false)} className="dm-action" style={{ marginLeft: '0.75rem', fontSize: '0.9rem' }}>✕</button>
+            </div>
 
-            {/* Target */}
-            <div style={{ padding: '1rem 1.25rem', borderBottom: '1px solid var(--dm-border)' }}>
-              <div className="dm-section mb-3">Target</div>
-              <div className="space-y-3">
-                <div>
-                  <label className="dm-label">Campaign</label>
-                  <select
-                    className="dm-select"
-                    value={form.campaign_id}
-                    onChange={e => setForm(f => ({ ...f, campaign_id: e.target.value }))}
-                  >
-                    <option value="">Select campaign…</option>
-                    {campaigns.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-                  </select>
+            <form onSubmit={handleSubmit} className="p-5 space-y-4">
+              {createError && (
+                <div style={{
+                  color: 'var(--dm-red)',
+                  background: 'var(--dm-red-bg)',
+                  border: '1px solid rgba(255,58,76,0.25)',
+                  padding: '0.45rem 0.7rem',
+                  fontSize: '0.75rem',
+                }}>
+                  ✕&nbsp;&nbsp;{createError}
                 </div>
+              )}
+
+              <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <div className="flex items-center justify-between mb-1">
-                    <label className="dm-label" style={{ marginBottom: 0 }}>Listener</label>
-                    <button
-                      type="button"
-                      onClick={() => setShowNewListener(true)}
-                      style={{
-                        background: 'none', border: '1px solid var(--dm-border)',
-                        color: 'var(--dm-accent-lo)', fontSize: '0.62rem',
-                        letterSpacing: '0.1em', padding: '1px 6px', cursor: 'pointer',
-                      }}
-                    >
-                      + new
-                    </button>
-                  </div>
+                  <label className="dm-label">Listener *</label>
                   <select
-                    className="dm-select"
+                    required
+                    className="dm-input"
                     value={form.listener_id}
                     onChange={e => setForm(f => ({ ...f, listener_id: e.target.value }))}
                   >
-                    <option value="">Select listener…</option>
+                    <option value="">— select —</option>
                     {listeners.map(l => (
                       <option key={l.id} value={l.id}>
-                        {l.name} — {l.type} {l.callback_host || l.bind_host}:{l.bind_port}
+                        {l.name} ({l.bind_host}:{l.bind_port})
                       </option>
                     ))}
                   </select>
                 </div>
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="dm-label">OS</label>
-                    <select className="dm-select" value={form.target_os}
-                      onChange={e => setForm(f => ({ ...f, target_os: e.target.value }))}>
-                      <option value="windows">Windows</option>
-                      <option value="linux">Linux</option>
-                      <option value="macos">macOS</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label className="dm-label">Arch</label>
-                    <select className="dm-select" value={form.target_arch}
-                      onChange={e => setForm(f => ({ ...f, target_arch: e.target.value }))}>
-                      <option value="x64">x64</option>
-                      <option value="x86">x86</option>
-                      <option value="arm64">ARM64</option>
-                    </select>
-                  </div>
+                <div>
+                  <label className="dm-label">Campaign</label>
+                  <select
+                    className="dm-input"
+                    value={form.campaign_id}
+                    onChange={e => setForm(f => ({ ...f, campaign_id: e.target.value }))}
+                  >
+                    <option value="">— none —</option>
+                    {campaigns.map(c => (
+                      <option key={c.id} value={c.id}>{c.name}</option>
+                    ))}
+                  </select>
                 </div>
               </div>
-            </div>
 
-            {/* Beacon */}
-            <div style={{ padding: '1rem 1.25rem', borderBottom: '1px solid var(--dm-border)' }}>
-              <div className="dm-section mb-3">Beacon</div>
-              <div className="grid grid-cols-2 gap-3 mb-3">
+              <div>
+                <label className="dm-label">C2 Profile</label>
+                <select
+                  className="dm-input"
+                  value={form.profile_name}
+                  onChange={e => setForm(f => ({ ...f, profile_name: e.target.value }))}
+                >
+                  <option value="">— default —</option>
+                  {profiles.map(p => (
+                    <option key={p.name} value={p.name}>{p.name}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="dm-label">Sleep (s)</label>
+                  <label className="dm-label">Target OS</label>
+                  <select
+                    className="dm-input"
+                    value={form.target_os}
+                    onChange={e => setForm(f => ({ ...f, target_os: e.target.value, target_arch: 'x64' }))}
+                  >
+                    <option value="windows">Windows</option>
+                    <option value="linux">Linux</option>
+                    <option value="macos">macOS</option>
+                  </select>
+                </div>
+                {form.target_os === 'macos' ? (
+                  <div>
+                    <label className="dm-label">Arch</label>
+                    <select
+                      className="dm-input"
+                      value={form.target_arch}
+                      onChange={e => setForm(f => ({ ...f, target_arch: e.target.value }))}
+                    >
+                      <option value="x64">x64 (Intel)</option>
+                      <option value="arm64">arm64 (M-series)</option>
+                    </select>
+                  </div>
+                ) : (
+                  <div />
+                )}
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="dm-label">Sleep (secs)</label>
                   <input
-                    type="number" min={1} max={3600}
+                    type="number" min={1} max={86400}
                     className="dm-input"
                     value={form.sleep_seconds}
-                    onChange={e => setForm(f => ({ ...f, sleep_seconds: +e.target.value }))}
+                    onChange={e => setForm(f => ({ ...f, sleep_seconds: Number(e.target.value) }))}
                   />
                 </div>
                 <div>
@@ -306,305 +422,87 @@ export function BuildPage() {
                     type="number" min={0} max={50}
                     className="dm-input"
                     value={form.jitter_pct}
-                    onChange={e => setForm(f => ({ ...f, jitter_pct: +e.target.value }))}
+                    onChange={e => setForm(f => ({ ...f, jitter_pct: Number(e.target.value) }))}
                   />
                 </div>
               </div>
-              <div className="mb-3">
-                <label className="dm-label">
-                  Sign Subject&nbsp;
-                  <span style={{ color: 'var(--dm-text-lo)', fontWeight: 400 }}>(leave blank = unsigned)</span>
-                </label>
+
+              <div>
+                <label className="dm-label">Sign Subject <span style={{ textTransform: 'none', color: 'var(--dm-text-dim)' }}>(optional)</span></label>
                 <input
                   className="dm-input"
-                  placeholder="CN=Microsoft Windows,O=Microsoft Corporation,C=US"
+                  placeholder="/C=US/O=Acme Corp/CN=Acme Software"
                   value={form.sign_subject}
                   onChange={e => setForm(f => ({ ...f, sign_subject: e.target.value }))}
                 />
               </div>
-              <div className="space-y-2">
-                <label className="flex items-center gap-2.5 cursor-pointer select-none">
-                  <input
-                    type="checkbox"
-                    checked={form.ephemeral}
-                    onChange={() => setForm(f => ({ ...f, ephemeral: !f.ephemeral }))}
-                    style={{ accentColor: 'var(--dm-accent-lo)', width: '13px', height: '13px', flexShrink: 0, cursor: 'pointer' }}
-                  />
-                  <span style={{ color: 'var(--dm-text-mid)', fontSize: '0.75rem' }}>Ephemeral (no persistence)</span>
-                </label>
-                <label className="flex items-center gap-2.5 cursor-pointer select-none">
-                  <input
-                    type="checkbox"
-                    checked={form.tls_skip_verify}
-                    onChange={() => setForm(f => ({ ...f, tls_skip_verify: !f.tls_skip_verify }))}
-                    style={{ accentColor: 'var(--dm-amber)', width: '13px', height: '13px', flexShrink: 0, cursor: 'pointer' }}
-                  />
-                  <span style={{ color: form.tls_skip_verify ? 'var(--dm-amber)' : 'var(--dm-text-lo)', fontSize: '0.75rem' }}>
-                    Skip TLS verify <span style={{ fontSize: '0.65rem', opacity: 0.7 }}>(dev/lab only)</span>
-                  </span>
-                </label>
-              </div>
-            </div>
 
-            {/* Features */}
-            {FEATURE_GROUPS.map(group => {
-              const groupFeats = group.features.map(([f]) => f)
-              const allChecked = groupFeats.every(f => form.features.includes(f))
-              function toggleGroup() {
-                setForm(prev => ({
-                  ...prev,
-                  features: allChecked
-                    ? prev.features.filter(f => !groupFeats.includes(f))
-                    : [...new Set([...prev.features, ...groupFeats])],
-                }))
-              }
-              return (
-                <div key={group.label} style={{ padding: '1rem 1.25rem', borderBottom: '1px solid var(--dm-border)' }}>
-                  <div className="flex items-center justify-between mb-3">
-                    <div className="dm-section">{group.label}</div>
-                    <button
-                      type="button"
-                      onClick={toggleGroup}
-                      style={{
-                        background: 'none',
-                        border: '1px solid var(--dm-border)',
-                        color: allChecked ? 'var(--dm-text-lo)' : 'var(--dm-accent-lo)',
-                        fontSize: '0.62rem',
-                        letterSpacing: '0.1em',
-                        padding: '2px 7px',
-                        cursor: 'pointer',
-                        textTransform: 'uppercase',
-                      }}
-                    >
-                      {allChecked ? 'none' : 'all'}
-                    </button>
+              <div>
+                <div className="dm-label" style={{ marginBottom: '0.5rem' }}>Features</div>
+                {Object.entries(featureGroups).map(([group, opts]) => (
+                  <div key={group} style={{ marginBottom: '0.5rem' }}>
+                    <div style={{ color: 'var(--dm-text-lo)', fontSize: '0.6rem', letterSpacing: '0.12em', marginBottom: '0.25rem' }}>
+                      {group.toUpperCase()}
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {opts.map(opt => {
+                        const active = form.features.includes(opt.id)
+                        return (
+                          <button
+                            key={opt.id}
+                            type="button"
+                            onClick={() => toggleFeature(opt.id)}
+                            style={{
+                              fontSize: '0.68rem',
+                              letterSpacing: '0.06em',
+                              padding: '0.2rem 0.55rem',
+                              background: active ? 'rgba(0,255,136,0.08)' : 'none',
+                              border: `1px solid ${active ? 'var(--dm-accent)' : 'var(--dm-border)'}`,
+                              color: active ? 'var(--dm-accent)' : 'var(--dm-text-mid)',
+                              cursor: 'pointer',
+                              fontFamily: 'inherit',
+                              transition: 'all 0.1s',
+                            }}
+                          >
+                            {opt.label}
+                          </button>
+                        )
+                      })}
+                    </div>
                   </div>
-                  <div className="space-y-2">
-                    {group.features.map(([feat, desc]) => (
-                      <label key={feat} className="flex items-start gap-2.5 cursor-pointer select-none">
-                        <input
-                          type="checkbox"
-                          checked={form.features.includes(feat)}
-                          onChange={() => toggleFeature(feat)}
-                          style={{ accentColor: 'var(--dm-accent-lo)', width: '13px', height: '13px', flexShrink: 0, marginTop: '2px', cursor: 'pointer' }}
-                        />
-                        <span>
-                          <span style={{ color: 'var(--dm-accent-lo)', fontSize: '0.72rem', letterSpacing: '0.04em' }}>{feat}</span>
-                          <span style={{ color: 'var(--dm-text-lo)', fontSize: '0.72rem' }}>&nbsp;—&nbsp;{desc}</span>
-                        </span>
-                      </label>
-                    ))}
-                  </div>
-                </div>
-              )
-            })}
-
-            <div style={{ padding: '1rem 1.25rem' }}>
-              <button
-                type="submit"
-                disabled={building}
-                className="dm-btn"
-              >
-                {building ? '// building...' : 'Build Payload'}
-              </button>
-            </div>
-          </form>
-        </div>
-
-        {/* ── Build history ─────────────────────────────────── */}
-        <div className="flex-1 overflow-y-auto">
-          <div style={{ padding: '1rem 1.5rem 0.5rem', borderBottom: '1px solid var(--dm-border)' }}>
-            <div className="dm-section">Build History</div>
-          </div>
-
-          {builds.length === 0 ? (
-            <p style={{ padding: '1.5rem', color: 'var(--dm-text-lo)', fontSize: '0.78rem' }}>
-              No builds yet.
-            </p>
-          ) : (
-            <table className="w-full" style={{ borderCollapse: 'collapse' }}>
-              <thead>
-                <tr style={{ borderBottom: '1px solid var(--dm-border)' }}>
-                  {['Status', 'Target', 'Campaign', 'Created', 'Artifact'].map(h => (
-                    <th key={h} style={{
-                      textAlign: 'left',
-                      fontWeight: 400,
-                      fontSize: '0.6rem',
-                      letterSpacing: '0.15em',
-                      textTransform: 'uppercase',
-                      color: 'var(--dm-text-lo)',
-                      padding: '0.6rem 1rem',
-                    }}>
-                      {h}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {builds.map((b, i) => (
-                  <tr
-                    key={b.id}
-                    style={{
-                      borderTop: i > 0 ? '1px solid var(--dm-border)' : undefined,
-                      background: b.id === lastBuildId ? 'var(--dm-accent-bg)' : undefined,
-                    }}
-                  >
-                    <td style={{ padding: '0.6rem 1rem' }}>
-                      <span style={{
-                        color: STATUS_COLOR[b.status] ?? 'var(--dm-text-mid)',
-                        fontSize: '0.68rem',
-                        fontWeight: 600,
-                        letterSpacing: '0.1em',
-                      }}>
-                        {b.status.toUpperCase()}
-                      </span>
-                    </td>
-                    <td style={{ padding: '0.6rem 1rem', color: 'var(--dm-text-mid)', fontSize: '0.78rem' }}>
-                      {b.target_os}/{b.target_arch}
-                    </td>
-                    <td style={{ padding: '0.6rem 1rem', color: 'var(--dm-text-lo)', fontSize: '0.75rem' }}>
-                      {b.campaign_id ? (campaignMap[b.campaign_id] ?? '—') : '—'}
-                    </td>
-                    <td style={{ padding: '0.6rem 1rem', color: 'var(--dm-text-lo)', fontSize: '0.72rem', whiteSpace: 'nowrap' }}>
-                      {new Date(b.created_at).toLocaleTimeString()}
-                    </td>
-                    <td style={{ padding: '0.6rem 1rem' }}>
-                      {b.status === 'complete' && b.artifact_url && (
-                        <div className="flex flex-col gap-1.5">
-                          <div className="flex items-baseline gap-2">
-                            <button
-                              type="button"
-                              onClick={() => downloadWrap(b.id, 'hta')}
-                              style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: 'var(--dm-amber)', fontSize: '0.72rem', transition: 'color 0.1s', flexShrink: 0 }}
-                              onMouseEnter={e => (e.currentTarget.style.color = 'var(--dm-accent)')}
-                              onMouseLeave={e => (e.currentTarget.style.color = 'var(--dm-amber)')}
-                            >
-                              ↓ hta
-                            </button>
-                            <span style={{ color: 'var(--dm-text-lo)', fontSize: '0.65rem' }}>
-                              mshta loader — no .exe extension, runs via mshta.exe
-                            </span>
-                          </div>
-                          <div className="flex items-baseline gap-2">
-                            <button
-                              type="button"
-                              onClick={() => downloadWrap(b.id, 'ps1')}
-                              style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: 'var(--dm-amber)', fontSize: '0.72rem', transition: 'color 0.1s', flexShrink: 0 }}
-                              onMouseEnter={e => (e.currentTarget.style.color = 'var(--dm-accent)')}
-                              onMouseLeave={e => (e.currentTarget.style.color = 'var(--dm-amber)')}
-                            >
-                              ↓ ps1
-                            </button>
-                            <span style={{ color: 'var(--dm-text-lo)', fontSize: '0.65rem' }}>
-                              PowerShell cradle — in-memory, no .exe dropped to disk
-                            </span>
-                          </div>
-                          <div className="flex items-baseline gap-2">
-                            <button
-                              type="button"
-                              onClick={() => downloadWrap(b.id, 'js')}
-                              style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: 'var(--dm-amber)', fontSize: '0.72rem', transition: 'color 0.1s', flexShrink: 0 }}
-                              onMouseEnter={e => (e.currentTarget.style.color = 'var(--dm-accent)')}
-                              onMouseLeave={e => (e.currentTarget.style.color = 'var(--dm-amber)')}
-                            >
-                              ↓ js
-                            </button>
-                            <span style={{ color: 'var(--dm-text-lo)', fontSize: '0.65rem' }}>
-                              wscript wrapper — breaks Chrome→exe parent chain that triggers ATD
-                            </span>
-                          </div>
-                        </div>
-                      )}
-                      {b.status === 'failed' && (
-                        <span style={{ color: 'var(--dm-red)', fontSize: '0.68rem' }}>failed</span>
-                      )}
-                    </td>
-                  </tr>
                 ))}
-              </tbody>
-            </table>
-          )}
-        </div>
-      </div>
+              </div>
 
-      {/* ── New Listener modal ──────────────────────────────── */}
-      {showNewListener && (
-        <div
-          style={{
-            position: 'fixed', inset: 0, zIndex: 50,
-            background: 'rgba(0,0,0,0.7)',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-          }}
-          onClick={e => { if (e.target === e.currentTarget) { setShowNewListener(false); setListenerError('') } }}
-        >
-          <div style={{
-            background: 'var(--dm-surface)', border: '1px solid var(--dm-border)',
-            padding: '1.5rem', width: '100%', maxWidth: '380px',
-          }}>
-            <div style={{ color: 'var(--dm-text-hi)', fontWeight: 700, fontSize: '0.82rem', letterSpacing: '0.12em', marginBottom: '1rem' }}>
-              NEW LISTENER
-            </div>
-            {listenerError && (
-              <div style={{ color: 'var(--dm-red)', fontSize: '0.72rem', marginBottom: '0.75rem' }}>
-                ✕&nbsp;{listenerError}
+              <div className="flex gap-4">
+                {([
+                  { key: 'tls_skip_verify', label: 'TLS Skip Verify' },
+                  { key: 'sleep_encrypt',   label: 'Sleep Encrypt' },
+                  { key: 'ephemeral',       label: 'Ephemeral' },
+                ] as const).map(({ key, label }) => {
+                  const val = form[key] as boolean
+                  return (
+                    <label key={key} className="flex items-center gap-1.5" style={{ cursor: 'pointer', fontSize: '0.72rem', color: val ? 'var(--dm-text-hi)' : 'var(--dm-text-lo)' }}>
+                      <input
+                        type="checkbox"
+                        checked={val}
+                        onChange={e => setForm(f => ({ ...f, [key]: e.target.checked }))}
+                        style={{ accentColor: 'var(--dm-accent)', cursor: 'pointer' }}
+                      />
+                      {label}
+                    </label>
+                  )
+                })}
               </div>
-            )}
-            <div className="space-y-3">
-              <div>
-                <label className="dm-label">Name</label>
-                <input className="dm-input" value={listenerForm.name}
-                  onChange={e => setListenerForm(f => ({ ...f, name: e.target.value }))} />
+
+              <div className="flex gap-3 pt-1">
+                <button type="submit" disabled={createBuild.isPending} className="dm-btn">
+                  {createBuild.isPending ? '// queuing...' : 'Queue Build'}
+                </button>
+                <button type="button" onClick={() => setShowForm(false)} className="dm-action" style={{ padding: '0 1rem', fontSize: '0.72rem' }}>
+                  Cancel
+                </button>
               </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="dm-label">Bind Host</label>
-                  <input className="dm-input" placeholder="0.0.0.0" value={listenerForm.bind_host}
-                    onChange={e => setListenerForm(f => ({ ...f, bind_host: e.target.value }))} />
-                </div>
-                <div>
-                  <label className="dm-label">Port</label>
-                  <input className="dm-input" type="number" min={1} max={65535} value={listenerForm.bind_port}
-                    onChange={e => setListenerForm(f => ({ ...f, bind_port: +e.target.value }))} />
-                </div>
-              </div>
-              <div>
-                <label className="dm-label">Callback Host <span style={{ color: 'var(--dm-text-lo)', fontWeight: 400 }}>(public IP / domain agents dial)</span></label>
-                <input className="dm-input" placeholder="e.g. 1.2.3.4 or c2.example.com"
-                  value={listenerForm.callback_host}
-                  onChange={e => setListenerForm(f => ({ ...f, callback_host: e.target.value }))} />
-              </div>
-              <div>
-                <label className="dm-label">Type</label>
-                <select className="dm-select" value={listenerForm.type}
-                  onChange={e => setListenerForm(f => ({ ...f, type: e.target.value }))}>
-                  <option value="https">HTTPS</option>
-                  <option value="http">HTTP</option>
-                  <option value="tcp">TCP</option>
-                  <option value="smb">SMB</option>
-                </select>
-              </div>
-            </div>
-            <div className="flex gap-3 mt-4">
-              <button
-                type="button"
-                className="dm-btn"
-                disabled={createListener.isPending || !listenerForm.name || !listenerForm.bind_host || !listenerForm.bind_port}
-                onClick={() => createListener.mutate(listenerForm)}
-              >
-                {createListener.isPending ? '// creating...' : 'Create'}
-              </button>
-              <button
-                type="button"
-                onClick={() => { setShowNewListener(false); setListenerError('') }}
-                style={{
-                  background: 'none', border: '1px solid var(--dm-border)',
-                  color: 'var(--dm-text-lo)', fontSize: '0.75rem',
-                  padding: '0.45rem 0.9rem', cursor: 'pointer',
-                }}
-              >
-                Cancel
-              </button>
-            </div>
+            </form>
           </div>
         </div>
       )}

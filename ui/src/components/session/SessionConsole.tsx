@@ -65,8 +65,11 @@ export function SessionConsole({ sessionId, campaignId: _campaignId, onRichOutpu
   const termRef      = useRef<HTMLDivElement>(null)
   const term         = useRef<Terminal>()
   const fitAddon     = useRef<FitAddon>()
-  const [input, setInput] = useState('')
-  const [busy, setBusy]   = useState(false)
+  const historyRef   = useRef<string[]>([])
+  const histIdxRef   = useRef<number>(0)
+  const [input, setInput]       = useState('')
+  const [busy, setBusy]         = useState(false)
+  const cmdQueueRef = useRef<string[]>([])
 
   useEffect(() => {
     if (!termRef.current || !containerRef.current) return
@@ -126,58 +129,65 @@ export function SessionConsole({ sessionId, campaignId: _campaignId, onRichOutpu
   }, [sessionId])
 
   async function sendCommand(cmd: string) {
-    if (!cmd.trim() || busy) return
+    if (!cmd.trim()) return
+
+    if (cmd !== historyRef.current[historyRef.current.length - 1]) {
+      historyRef.current.push(cmd)
+    }
+    histIdxRef.current = historyRef.current.length
+
     setBusy(true)
+    try {
+      if (cmd.startsWith('!')) {
+        const line = cmd.slice(1).trim()
 
-    if (cmd.startsWith('!')) {
-      const line = cmd.slice(1).trim()
+        if (line === 'help' || line === '') {
+          HELP_LINES.forEach(l => term.current?.writeln(l))
+          return
+        }
 
-      if (line === 'help' || line === '') {
-        HELP_LINES.forEach(l => term.current?.writeln(l))
-        setBusy(false)
+        const tokens = tokenize(line)
+        const type   = tokens[0]
+        const method = tokens[1]
+
+        if (!method) {
+          term.current?.writeln('\x1b[31musage: !<type> <method> [key=value ...]\x1b[0m')
+          return
+        }
+
+        const args = { method, ...parseModuleArgs(tokens.slice(2)) }
+        term.current?.writeln(`\x1b[35m[${type}/${method}]\x1b[0m`)
+
+        try {
+          const { data } = await api.post('/api/v1/tasks', {
+            session_id: sessionId,
+            type,
+            args: btoa(JSON.stringify(args)),
+          })
+          await pollTaskOutput(data.task_id, `${type}/${method}`)
+        } catch (err: unknown) {
+          term.current?.writeln(`\x1b[31mError: ${(err as Error).message}\x1b[0m`)
+        }
         return
       }
 
-      const tokens = tokenize(line)
-      const type   = tokens[0]
-      const method = tokens[1]
-
-      if (!method) {
-        term.current?.writeln('\x1b[31musage: !<type> <method> [key=value ...]\x1b[0m')
-        setBusy(false)
-        return
-      }
-
-      const args = { method, ...parseModuleArgs(tokens.slice(2)) }
-      term.current?.writeln(`\x1b[35m[${type}/${method}]\x1b[0m`)
-
+      term.current?.writeln(`\x1b[33m$ ${cmd}\x1b[0m`)
       try {
         const { data } = await api.post('/api/v1/tasks', {
           session_id: sessionId,
-          type,
-          args: btoa(JSON.stringify(args)),
+          type:       'shell',
+          args:       btoa(JSON.stringify({ cmd })),
         })
-        await pollTaskOutput(data.task_id, `${type}/${method}`)
+        await pollTaskOutput(data.task_id)
       } catch (err: unknown) {
         term.current?.writeln(`\x1b[31mError: ${(err as Error).message}\x1b[0m`)
-      } finally {
-        setBusy(false)
       }
-      return
-    }
-
-    term.current?.writeln(`\x1b[33m$ ${cmd}\x1b[0m`)
-    try {
-      const { data } = await api.post('/api/v1/tasks', {
-        session_id: sessionId,
-        type:       'shell',
-        args:       btoa(JSON.stringify({ cmd })),
-      })
-      await pollTaskOutput(data.task_id)
-    } catch (err: unknown) {
-      term.current?.writeln(`\x1b[31mError: ${(err as Error).message}\x1b[0m`)
     } finally {
       setBusy(false)
+      if (cmdQueueRef.current.length > 0) {
+        const next = cmdQueueRef.current.shift()!
+        setTimeout(() => sendCommand(next), 0)
+      }
     }
   }
 
@@ -216,7 +226,32 @@ export function SessionConsole({ sessionId, campaignId: _campaignId, onRichOutpu
   }
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+    if (e.key === 'ArrowUp') {
+      e.preventDefault()
+      histIdxRef.current = Math.max(0, histIdxRef.current - 1)
+      setInput(historyRef.current[histIdxRef.current] ?? '')
+      return
+    }
+    if (e.key === 'ArrowDown') {
+      e.preventDefault()
+      histIdxRef.current++
+      if (histIdxRef.current >= historyRef.current.length) {
+        setInput('')
+        histIdxRef.current = historyRef.current.length
+      } else {
+        setInput(historyRef.current[histIdxRef.current])
+      }
+      return
+    }
     if (e.key === 'Enter') {
+      if (busy) {
+        if (input.trim()) {
+          cmdQueueRef.current.push(input)
+          term.current?.writeln(`\x1b[90m[queued: ${input}]\x1b[0m`)
+          setInput('')
+        }
+        return
+      }
       sendCommand(input)
       setInput('')
     }
@@ -245,8 +280,7 @@ export function SessionConsole({ sessionId, campaignId: _campaignId, onRichOutpu
           value={input}
           onChange={e => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
-          disabled={busy}
-          placeholder={busy ? 'waiting for output...' : 'command or !type method [key=val ...]'}
+          placeholder={busy ? 'running — type to queue next...' : 'command or !type method [key=val ...]'}
           autoComplete="off"
           spellCheck={false}
           style={{

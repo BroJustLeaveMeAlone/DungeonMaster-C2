@@ -192,6 +192,20 @@ CREATE TABLE IF NOT EXISTS events (
 
 CREATE INDEX IF NOT EXISTS idx_events_campaign ON events(campaign_id, occurred_at DESC);
 
+CREATE TABLE IF NOT EXISTS vault_credentials (
+    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    session_id   TEXT NOT NULL DEFAULT '',
+    campaign_id  TEXT NOT NULL DEFAULT '',
+    hostname     TEXT NOT NULL DEFAULT '',
+    username     TEXT NOT NULL DEFAULT '',
+    domain       TEXT NOT NULL DEFAULT '',
+    secret       TEXT NOT NULL DEFAULT '',
+    kind         TEXT NOT NULL DEFAULT 'other',
+    source       TEXT NOT NULL DEFAULT 'manual',
+    notes        TEXT NOT NULL DEFAULT '',
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS evidence (
     id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     campaign_id          UUID REFERENCES campaigns(id),

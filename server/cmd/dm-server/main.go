@@ -18,7 +18,6 @@ import (
 	"github.com/BroJustLeaveMeAlone/DungeonMaster-C2/server/internal/storage"
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
-	"google.golang.org/grpc"
 )
 
 func main() {
@@ -93,30 +92,13 @@ func run(log *zap.Logger) error {
 		}
 	}()
 
-	// --- gRPC server (agent + operator API) --------------------------------
-	grpcAddr := envOr("DM_GRPC_ADDR", ":50051")
-	grpcLis, err := net.Listen("tcp", grpcAddr)
-	if err != nil {
-		return fmt.Errorf("grpc listen %s: %w", grpcAddr, err)
+	// --- gRPC server (Phase 2 — not started yet) ----------------------------
+	// dm.proto defines the full service contracts; RegisterAll is the stub.
+	// Set DM_GRPC_ADDR to enable the listener once services are wired.
+	grpcAddr := os.Getenv("DM_GRPC_ADDR")
+	if grpcAddr != "" {
+		log.Warn("DM_GRPC_ADDR is set but gRPC services are not yet implemented — listener skipped")
 	}
-
-	grpcServer := grpc.NewServer(
-		grpc.ChainUnaryInterceptor(
-			api.AuthInterceptor(log),
-			api.AuditInterceptor(log),
-		),
-		grpc.ChainStreamInterceptor(
-			api.StreamAuthInterceptor(log),
-		),
-	)
-	api.RegisterAll(grpcServer, sessionMgr, bus, log)
-
-	log.Info("gRPC server listening", zap.String("addr", grpcAddr))
-	go func() {
-		if err := grpcServer.Serve(grpcLis); err != nil {
-			log.Error("grpc serve", zap.Error(err))
-		}
-	}()
 
 	// --- HTTP gateway (REST + SSE for the web UI) --------------------------
 	httpAddr := envOr("DM_HTTP_ADDR", ":8080")
@@ -163,8 +145,6 @@ func run(log *zap.Logger) error {
 	// --- Wait for shutdown --------------------------------------------------
 	<-ctx.Done()
 	log.Info("shutdown signal received")
-
-	grpcServer.GracefulStop()
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()

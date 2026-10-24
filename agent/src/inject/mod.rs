@@ -15,6 +15,7 @@ pub mod stomp;
 pub use classic::inject_classic;
 #[cfg(target_os = "windows")]
 pub use apc::inject_apc;
+#[cfg(target_os = "windows")]
 pub use apc::inject_classic_spawn;
 #[cfg(target_os = "windows")]
 pub use hollow::inject_hollow;

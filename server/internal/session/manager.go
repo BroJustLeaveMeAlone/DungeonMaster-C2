@@ -165,7 +165,7 @@ func (m *Manager) Heartbeat(ctx context.Context, sessionID string) (HeartbeatRes
 	var isRevoked bool
 	err := db.Pool.QueryRow(ctx,
 		`UPDATE sessions SET last_seen = NOW(), is_alive = TRUE
-		 WHERE id = $1 AND is_alive = TRUE
+		 WHERE id = $1
 		 RETURNING is_revoked, sleep_seconds, jitter_pct`,
 		sessionID,
 	).Scan(&isRevoked, &r.SleepSeconds, &r.JitterPct)

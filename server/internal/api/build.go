@@ -96,7 +96,8 @@ func (g *gateway) handleCreateBuild(w http.ResponseWriter, r *http.Request) {
 		campaignID = &cfg.CampaignID
 	}
 
-	evasionFlags := fmt.Sprintf(`{"ephemeral":%v}`, cfg.Ephemeral)
+	evasionFlagsBytes, _ := json.Marshal(map[string]bool{"ephemeral": cfg.Ephemeral})
+	evasionFlags := string(evasionFlagsBytes)
 
 	var b buildView
 	err := db.Pool.QueryRow(r.Context(), `
@@ -473,10 +474,12 @@ func removeFeature(features, remove string) string {
 func resolveTarget(targetOS, targetArch string) (cargoTarget, binName, ext string) {
 	switch targetOS {
 	case "linux":
-		switch targetArch {
-		default:
-			return "x86_64-unknown-linux-musl", "dm-agent", ""
+		return "x86_64-unknown-linux-musl", "dm-agent", ""
+	case "macos":
+		if targetArch == "x64" {
+			return "x86_64-apple-darwin", "dm-agent", ""
 		}
+		return "aarch64-apple-darwin", "dm-agent", ""
 	default: // windows
 		return "x86_64-pc-windows-gnu", "dm-agent.exe", ".exe"
 	}

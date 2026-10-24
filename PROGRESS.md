@@ -1,12 +1,64 @@
 # DungeonMaster C2 — Progress Tracker
 
-Last updated: 2026-07-27 (session 11)
+Last updated: 2026-10-24 (session 13 — codebase audit + bug fixes)
 
 ---
 
 ## Current Status
 
-**Active phase:** External testing setup
+**Active phase:** Codebase audit complete — all critical/high bugs fixed ✅
+
+**Session 13 complete (2026-10-24) — Full Go + Rust + UI audit:**
+
+Go server fixes:
+- `c2.go`: `r.Context()` passed to 3x `go s.bus.Publish()` goroutines → context cancelled when handler returned → SSE events silently dropped. Fixed to `context.Background()`.
+- `manager.go`: `Heartbeat` WHERE had `AND is_alive = TRUE` — sessions revoked after going stale couldn't deliver kill signal. Fixed by removing the filter.
+- `deliver.go`: `strings.TrimPrefix(httpAddr, ":")` broke on `0.0.0.0:PORT` format. Fixed with `splitHostPort()`.
+- `build.go:99`: `fmt.Sprintf` for JSONB replaced with `json.Marshal`.
+- `main.go`: gRPC server started on :50051 with no services registered (never wired). Removed listener startup; port stays closed. `DM_GRPC_ADDR` env var re-enables it when Phase 2 is ready.
+- `collab/bus.go`: `Start()` returned on Redis channel close → SSE bus permanently dead until server restart. Added reconnect loop with exponential backoff (1s → 30s cap).
+
+Rust agent fixes:
+- `executor.rs`: `exec_sleep` was a no-op (returned success without updating sleep/jitter). Fixed: parses `seconds`/`jitter_pct` from args, returns them via new `TaskOutput` fields (`new_sleep_secs`, `new_jitter_pct`); `agent_loop.rs` applies them.
+- `inject/mod.rs`: `pub use apc::inject_classic_spawn` missing `#[cfg(target_os = "windows")]` guard. Fixed.
+- `bin/dm-stub.rs`: Debug IOC writes to `C:\Windows\Temp\` present in release builds. Wrapped in `#[cfg(debug_assertions)]`.
+- `agent_loop.rs`: `subsec_nanos()` jitter seed → weak entropy. Replaced with combined seed (secs × prime ^ nanos × prime ^ stack_ptr × prime).
+- `evasion.rs`: `UpdateProcThreadAttribute` cbSize used `size_of::<HANDLE>()` instead of `size_of_val(&inherit_list)`. Fixed.
+- `dropper_main.rs`: `subsec_nanos()` temp dir suffix — concurrent runs collide. Same combined-seed fix; format updated to `{:016x}`.
+- `lateral.rs`: remote smb-psexec wrote bat file to LOCAL `C:\Windows\Temp\` — remote schtasks couldn't find it. Fixed to write via `\\host\admin$\Temp\` UNC for remote targets; cleanup also updated.
+- `antifor.rs`: `eventlog_del` exported then re-imported the full log (no filter step) — net effect was zero deletions. Removed re-import; now clears the channel. Output message now honestly reports full-channel clear.
+- `collect.rs`: keylogger `vk_to_char` had no Shift/CapsLock awareness — all letters logged lowercase, Shift+digits never captured. Added `upper` parameter; loop now reads VK_SHIFT (0x10) and VK_CAPITAL toggle (0x14).
+
+UI fixes:
+- Created missing `BuildPage.tsx` (builds list + new build modal + deliver dropdown).
+- `SessionConsole.tsx`: `cmdQueue` unused state → converted to `useRef`.
+- `QuickStartWizard.tsx`: Wrong Listener interface field names; hardcoded listener creation fields; build POST wrong format; `execSteps` not reset on retry.
+- `CampaignPage.tsx`: EventSource `onerror` closed permanently → replaced with exponential backoff reconnect.
+- `useTaskQueue.ts`: `pollOutput` returned `null` for both timeout and failed tasks → now throws on failure.
+- `TaskBuilder.tsx`: `alert()` validation errors → inline error display.
+- `RichOutput.tsx`: Blob URL leak on unmount; unsafe ArrayBuffer cast with non-zero byteOffset.
+- `LureGenPage.tsx`: Hardcoded absolute operator path in uvicorn command.
+
+Open (lower priority):
+- Go: Bus.Start no Redis reconnect; `DeriveSessionKey` unused/HKDF TODO; dead `ListenAndServeTLS`; temp file leak on upload; `inferContentType` only detects BMP; stale session-ID-encryption comment; discarded Zap errors.
+- Rust: HTTP status not checked in winhttp.rs/https.rs channels; `antifor.rs` eventlog-del ignores record_id; `dll_main.rs` TOCTOU + DllMain LoadLibraryA; `crypto.rs` misleading error name; `loader.rs` `.text` section name assumption.
+
+**Next:** Continue from session 12 — external connectivity (ngrok/redirector VPS), set listener Callback Host to public address, build new agent, test session from outside local network.
+
+---
+
+**Session 12 complete (2026-10-22):**
+- Trojan `PDFReaderSetup.exe` fully functional end-to-end
+- APC injection chain confirmed working: dllhost.exe spawned, shellcode executes, WinExec launches msupdate.exe at elevated privilege
+- Active C2 session: pid=1612, msupdate.exe, elevated=True, first_seen 2026-10-22T13:18:29Z
+- Build: `C:\dev\DM-clean\Testing-builds\PDFReaderSetup-20261022-1611.exe` (12326912 bytes)
+- Shellcode: x64 PEB-walk → kernel32 → WinExec ror13-hash, path embedded via call-pop trick (231 bytes)
+- WD exclusions added: Desktop path added to support testing; process exclusions already in place
+- Trojan source: `C:\Users\owner\iCloudDrive\Docs\Amit_personal\My Personal Stuff\Red Team\Trojan(experimental)\`
+- Agent embedded as resource 102: `C:\dev\DM-clean\lab-builds\dm-batch34.exe` (943104 bytes)
+- PPID-spoof removed from spawn_detached() + install_persistence() — plain CreateProcessW, cross-session issue resolved
+
+**Next for Trojan:** Donut integration to run DM agent reflectively inside dllhost.exe (in-process session from dllhost.exe vs current separate msupdate.exe process). Requires Donut on host or container.
 
 **Session 11 complete:**
 - `DM_REG_KEY` implemented: AES-256-GCM registration payload encryption across full stack

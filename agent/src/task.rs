@@ -104,11 +104,13 @@ pub struct TaskOutput {
     pub evasion_detected:    bool,
     pub evasion_description: Option<String>,
     pub should_exit:         bool,
+    pub new_sleep_secs:      Option<u64>,
+    pub new_jitter_pct:      Option<u64>,
 }
 
 impl TaskOutput {
     pub fn success(data: Vec<u8>) -> Self {
-        Self { data, success: true, evasion_detected: false, evasion_description: None, should_exit: false }
+        Self { data, success: true, evasion_detected: false, evasion_description: None, should_exit: false, new_sleep_secs: None, new_jitter_pct: None }
     }
 
     pub fn failure(msg: &str) -> Self {
@@ -118,6 +120,8 @@ impl TaskOutput {
             evasion_detected:    false,
             evasion_description: None,
             should_exit:         false,
+            new_sleep_secs:      None,
+            new_jitter_pct:      None,
         }
     }
 
@@ -128,6 +132,8 @@ impl TaskOutput {
             evasion_detected:    true,
             evasion_description: Some(description),
             should_exit:         false,
+            new_sleep_secs:      None,
+            new_jitter_pct:      None,
         }
     }
 
@@ -138,6 +144,8 @@ impl TaskOutput {
             evasion_detected:    false,
             evasion_description: None,
             should_exit:         true,
+            new_sleep_secs:      None,
+            new_jitter_pct:      None,
         }
     }
 }

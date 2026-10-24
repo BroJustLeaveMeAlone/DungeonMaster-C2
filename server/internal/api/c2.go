@@ -119,8 +119,8 @@ func (s *C2Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Notify operators
-	go s.bus.Publish(r.Context(), collab.NewSessionCheckinEvent(req.CampaignID, resp.SessionID))
+	// Notify operators — context.Background() because the goroutine outlives the HTTP handler.
+	go s.bus.Publish(context.Background(), collab.NewSessionCheckinEvent(req.CampaignID, resp.SessionID))
 
 	w.Header().Set("Content-Type", "application/octet-stream")
 	json.NewEncoder(w).Encode(resp)
@@ -206,13 +206,13 @@ func (s *C2Server) handleOutput(w http.ResponseWriter, r *http.Request, sessionI
 	sess, _ := s.sessions.Get(r.Context(), sessionID)
 	if sess != nil {
 		ev := collab.NewTaskOutputEvent(sess.CampaignID, sessionID, req.TaskID, req.Output)
-		go s.bus.Publish(r.Context(), ev)
+		go s.bus.Publish(context.Background(), ev)
 
 		if req.EvasionEvent {
 			evasionEv := collab.NewEvasionEvent(
 				sess.CampaignID, sessionID, req.TaskID, req.EvasionDescription,
 			)
-			go s.bus.Publish(r.Context(), evasionEv)
+			go s.bus.Publish(context.Background(), evasionEv)
 		}
 
 		// Store evidence in MinIO and record in evidence table

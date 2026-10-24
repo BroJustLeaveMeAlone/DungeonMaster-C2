@@ -12,11 +12,12 @@ RUN git clone --depth 1 https://github.com/mtrojnar/osslsigncode /src && \
 # ── Rust cross-compile builder ────────────────────────────────────────────────
 FROM rust:1.86-alpine AS builder
 
-RUN apk add --no-cache mingw-w64-gcc musl-dev python3 openssl
+RUN apk add --no-cache mingw-w64-gcc musl-dev python3 openssl zig
 
 COPY --from=osslsign /build/osslsigncode /usr/local/bin/osslsigncode
 
-RUN rustup target add x86_64-pc-windows-gnu x86_64-unknown-linux-musl
+RUN rustup target add x86_64-pc-windows-gnu x86_64-unknown-linux-musl aarch64-apple-darwin x86_64-apple-darwin
+RUN cargo install cargo-zigbuild --version 0.21.8 --locked
 
 WORKDIR /build
 COPY agent/ .
@@ -95,13 +96,35 @@ RUN --mount=type=cache,id=dm-cargo-registry,target=/root/.cargo/registry \
             rm -f /tmp/cs.key /tmp/cs.crt; \
         fi; \
     else \
-        if [ -n "$DM_FEATURES" ]; then \
-            cargo build --release --bin dm-agent --target $DM_TARGET --features "$DM_FEATURES"; \
+        case "$DM_TARGET" in \
+            *apple*) \
+                CARGO_CMD="cargo zigbuild" ; \
+                EXTRA_FLAGS="--no-default-features" ; \
+                BASE_FEATURES="channel-https" ;; \
+            *) \
+                CARGO_CMD="cargo build" ; \
+                EXTRA_FLAGS="" ; \
+                BASE_FEATURES="" ;; \
+        esac && \
+        if [ -n "$DM_FEATURES" ] && [ -n "$BASE_FEATURES" ]; then \
+            FEATURES="${BASE_FEATURES},${DM_FEATURES}"; \
+        elif [ -n "$DM_FEATURES" ]; then \
+            FEATURES="$DM_FEATURES"; \
+        elif [ -n "$BASE_FEATURES" ]; then \
+            FEATURES="$BASE_FEATURES"; \
         else \
-            cargo build --release --bin dm-agent --target $DM_TARGET; \
+            FEATURES=""; \
+        fi && \
+        if [ -n "$FEATURES" ]; then \
+            $CARGO_CMD --release --bin dm-agent --target $DM_TARGET $EXTRA_FLAGS --features "$FEATURES"; \
+        else \
+            $CARGO_CMD --release --bin dm-agent --target $DM_TARGET $EXTRA_FLAGS; \
         fi && \
         cp /build/target/${DM_TARGET}/release/${DM_BIN} /output/${DM_BIN} && \
-        python3 /deploy/pe_patch.py "/output/${DM_BIN}" --inplace && \
+        case "$DM_TARGET" in \
+            *apple*) ;; \
+            *) python3 /deploy/pe_patch.py "/output/${DM_BIN}" --inplace ;; \
+        esac && \
         if [ "$DM_PACK_STAGER" != "true" ] && [ -n "$DM_SIGN_SUBJECT" ]; then \
             openssl req -new -x509 -newkey rsa:2048 -keyout /tmp/cs.key -out /tmp/cs.crt \
                 -days 3650 -nodes -subj "$DM_SIGN_SUBJECT" 2>/dev/null && \

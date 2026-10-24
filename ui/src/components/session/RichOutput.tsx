@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { Download, X, ChevronDown, ChevronUp } from 'lucide-react'
 
 export type RichContent =
@@ -62,13 +62,16 @@ function tryDecodeUtf8(bytes: Uint8Array): string | null {
 
 function ImageViewer({ item }: { item: Extract<RichContent, { kind: 'image' }> }) {
   const mime = item.data[0] === 0x89 ? 'image/png' : 'image/bmp'
-  const url  = URL.createObjectURL(new Blob([item.data.buffer as ArrayBuffer], { type: mime }))
+  const [url] = useState(() => {
+    const buf = item.data.buffer.slice(item.data.byteOffset, item.data.byteOffset + item.data.byteLength) as ArrayBuffer
+    return URL.createObjectURL(new Blob([buf], { type: mime }))
+  })
+  useEffect(() => () => URL.revokeObjectURL(url), [url])
   return (
     <img
       src={url}
       alt={item.label}
       style={{ maxWidth: '100%', maxHeight: '400px', objectFit: 'contain', display: 'block' }}
-      onLoad={() => URL.revokeObjectURL(url)}
     />
   )
 }
@@ -143,7 +146,8 @@ function JsonViewer({ item }: { item: Extract<RichContent, { kind: 'json' }> }) 
 
 function BinaryViewer({ item }: { item: Extract<RichContent, { kind: 'binary' }> }) {
   function download() {
-    const url = URL.createObjectURL(new Blob([item.data.buffer as ArrayBuffer]))
+    const buf = item.data.buffer.slice(item.data.byteOffset, item.data.byteOffset + item.data.byteLength) as ArrayBuffer
+    const url = URL.createObjectURL(new Blob([buf]))
     const a   = document.createElement('a')
     a.href     = url
     a.download = item.label || 'output.bin'

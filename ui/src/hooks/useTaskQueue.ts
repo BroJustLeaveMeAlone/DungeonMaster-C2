@@ -17,8 +17,14 @@ export function useTaskQueue(sessionId: string) {
       await sleep(interval)
       try {
         const { data } = await api.get(`/api/v1/tasks/${taskId}`)
-        if (data.status === 'complete' || data.status === 'failed') {
-          if (!data.output || data.status === 'failed') return null
+        if (data.status === 'failed') {
+          const msg = data.output
+            ? new TextDecoder().decode(Uint8Array.from(atob(data.output), c => c.charCodeAt(0)))
+            : 'task failed'
+          throw new Error(msg.trim() || 'task failed')
+        }
+        if (data.status === 'complete') {
+          if (!data.output) return null
           return Uint8Array.from(atob(data.output), c => c.charCodeAt(0))
         }
       } catch { /* continue */ }

@@ -5,7 +5,7 @@ export function LureGenPage() {
   const [serviceUp, setServiceUp] = useState<boolean | null>(null)
 
   useEffect(() => {
-    fetch('http://localhost:8000', { method: 'HEAD', signal: AbortSignal.timeout(3000) })
+    fetch('/lure/', { method: 'HEAD', signal: AbortSignal.timeout(3000) })
       .then(() => setServiceUp(true))
       .catch(() => setServiceUp(false))
   }, [])
@@ -27,6 +27,14 @@ export function LureGenPage() {
               onMouseLeave={e => (e.currentTarget.style.color = 'var(--dm-text-mid)')}
             >
               Builds
+            </Link>
+            <Link
+              to="/vault"
+              style={{ color: 'var(--dm-text-mid)', fontSize: '0.72rem', letterSpacing: '0.08em', textDecoration: 'none', transition: 'color 0.1s' }}
+              onMouseEnter={e => (e.currentTarget.style.color = 'var(--dm-text-hi)')}
+              onMouseLeave={e => (e.currentTarget.style.color = 'var(--dm-text-mid)')}
+            >
+              Vault
             </Link>
             <Link
               to="/manual"
@@ -57,14 +65,14 @@ export function LureGenPage() {
                 Lure Gen service not reachable
               </div>
               <code style={{ color: 'var(--dm-text-hi)', fontSize: '0.75rem' }}>
-                cd "C:\Users\owner\iCloudDrive\Docs\Amit_personal\My Personal Stuff\Red Team\lure-gen" &amp;&amp; start.bat
+                uvicorn main:app --host 0.0.0.0 --port 8000
               </code>
               <div style={{ marginTop: '1rem' }}>
                 <button
                   className="dm-action dm-go"
                   onClick={() => {
                     setServiceUp(null)
-                    fetch('http://localhost:8000', { method: 'HEAD', signal: AbortSignal.timeout(3000) })
+                    fetch('/lure/', { method: 'HEAD', signal: AbortSignal.timeout(3000) })
                       .then(() => setServiceUp(true))
                       .catch(() => setServiceUp(false))
                   }}
@@ -76,7 +84,7 @@ export function LureGenPage() {
           </div>
         ) : (
           <iframe
-            src="http://localhost:8000"
+            src="/lure/"
             style={{
               flex: 1,
               width: '100%',

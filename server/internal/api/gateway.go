@@ -61,6 +61,10 @@ func NewHTTPGateway(grpcAddr string, sessions *session.Manager, bus *collab.Bus,
 	protected.HandleFunc("POST /api/v1/profiles",         g.handleCreateProfile)
 	protected.HandleFunc("GET /api/v1/profiles/{name}",   g.handleGetProfile)
 	protected.HandleFunc("DELETE /api/v1/profiles/{name}", g.handleDeleteProfile)
+	protected.HandleFunc("GET /api/v1/vault/credentials",         g.handleVaultList)
+	protected.HandleFunc("POST /api/v1/vault/credentials",        g.handleVaultCreate)
+	protected.HandleFunc("DELETE /api/v1/vault/credentials/{id}", g.handleVaultDelete)
+	protected.HandleFunc("GET /api/v1/vault/credentials/export",  g.handleVaultExport)
 
 	mux.Handle("/api/v1/", httpAuth(protected))
 

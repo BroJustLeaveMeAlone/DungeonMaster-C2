@@ -360,7 +360,7 @@ pub fn spawn_shell_spoofed(cmd: &str) -> Result<Vec<u8>, &'static str> {
             attr_list, 0,
             PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
             inherit_list.as_mut_ptr() as *mut _,
-            core::mem::size_of::<HANDLE>(),
+            core::mem::size_of_val(&inherit_list),
             core::ptr::null_mut(), core::ptr::null_mut(),
         )
     } == 0 {

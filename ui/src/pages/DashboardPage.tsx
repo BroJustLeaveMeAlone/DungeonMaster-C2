@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { api } from '../api/client'
 import { useAuthStore } from '../store/auth'
+import { QuickStartWizard } from '../components/QuickStartWizard'
 
 interface Session {
   id:           string
@@ -29,6 +30,7 @@ export function DashboardPage() {
   const clearAuth = useAuthStore(s => s.clearAuth)
   const qc        = useQueryClient()
 
+  const [showWizard,  setShowWizard]  = useState(false)
   const [showCreate,  setShowCreate]  = useState(false)
   const [createForm,  setCreateForm]  = useState(CAMPAIGN_INIT)
   const [creating,    setCreating]    = useState(false)
@@ -102,6 +104,14 @@ export function DashboardPage() {
             >
               Lure Gen
             </Link>
+            <Link
+              to="/vault"
+              style={{ color: 'var(--dm-text-mid)', fontSize: '0.72rem', letterSpacing: '0.08em', textDecoration: 'none', transition: 'color 0.1s' }}
+              onMouseEnter={e => (e.currentTarget.style.color = 'var(--dm-text-hi)')}
+              onMouseLeave={e => (e.currentTarget.style.color = 'var(--dm-text-mid)')}
+            >
+              Vault
+            </Link>
             <span style={{ color: 'var(--dm-text-lo)', fontSize: '0.68rem', letterSpacing: '0.06em' }}>
               {operator?.username} / {operator?.role}
             </span>
@@ -123,9 +133,34 @@ export function DashboardPage() {
           <div className="flex items-center justify-between mb-4">
             <div className="dm-section flex-1">Active Campaigns</div>
             <button
-              onClick={() => { setShowCreate(true); setCreateError('') }}
+              onClick={() => setShowWizard(true)}
               style={{
                 marginLeft: '1rem',
+                color: 'var(--dm-accent)',
+                background: 'none',
+                border: '1px solid var(--dm-border)',
+                fontFamily: 'inherit',
+                fontSize: '0.68rem',
+                letterSpacing: '0.1em',
+                padding: '0.2rem 0.65rem',
+                cursor: 'pointer',
+                transition: 'border-color 0.12s, color 0.12s',
+              }}
+              onMouseEnter={e => {
+                e.currentTarget.style.borderColor = 'var(--dm-accent)'
+                e.currentTarget.style.color = 'var(--dm-accent)'
+              }}
+              onMouseLeave={e => {
+                e.currentTarget.style.borderColor = 'var(--dm-border)'
+                e.currentTarget.style.color = 'var(--dm-accent)'
+              }}
+            >
+              // QUICK START
+            </button>
+            <button
+              onClick={() => { setShowCreate(true); setCreateError('') }}
+              style={{
+                marginLeft: '0.5rem',
                 color: 'var(--dm-accent-lo)',
                 background: 'none',
                 border: '1px solid var(--dm-border)',
@@ -260,6 +295,13 @@ export function DashboardPage() {
           </div>
         </section>
       </div>
+
+      {showWizard && (
+        <QuickStartWizard
+          onClose={() => setShowWizard(false)}
+          onDone={() => { void qc.invalidateQueries({ queryKey: ['campaigns'] }); setShowWizard(false) }}
+        />
+      )}
 
       {/* New campaign modal */}
       {showCreate && (
