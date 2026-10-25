@@ -1,12 +1,25 @@
 # DungeonMaster C2 — Progress Tracker
 
-Last updated: 2026-10-25 (session 16 — comprehensive feature testing)
+Last updated: 2026-10-25 (session 18 — inject/stomp verified)
 
 ---
 
 ## Current Status
 
 **Active phase:** Feature testing complete ✅ — FEATURE-TESTS.md fully updated
+
+**Session 18 complete (2026-10-25) — inject/stomp verified [P]:**
+
+`inject/stomp` — pagefile-backed section + APC injection into svchost PID 944. Output: `stomped`. Requires elevated session (SeDebugPrivilege enabled). Args: `pid` (integer) + `shellcode` (b64). FEATURE-TESTS.md updated. All non-AD non-stomp features now tested.
+
+**Remaining untested:** AD-dependent features (17) — require DC01 VM (not present in current lab). All were confirmed working in sessions 6–9 with a full AD lab.
+
+**Active sessions (session 18):**
+- `1eb085a9` — labadmin (PID 4476), dm-stomp.exe (inject-stomp feature build `d7b660d9`)
+- `6e1ad0cb` — labadmin (PID 2072), dm-noev2-session17.exe
+- `2a30fe2d` — TARGET01$/SYSTEM (PID 4796), dm-noev2-session17.exe
+
+---
 
 **Session 17 complete (2026-10-25) — Bug fixes + verified:**
 

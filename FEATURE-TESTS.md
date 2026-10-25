@@ -207,7 +207,7 @@
 | [E] | `inject/classic-spawn` | Same Defender blocking of CREATE_SUSPENDED process creation |
 | [E] | `inject/hollow` | Same |
 | [P] | `inject/hijack` | Thread-context hijack into existing PID; args: pid (integer), shellcode (b64) |
-| [ ] | `inject/stomp` | Not compiled — requires `inject-stomp` feature flag at build time |
+| [P] | `inject/stomp` | args: pid (integer), shellcode (b64); pagefile-backed section + APC delivery; requires elevated session with SeDebugPrivilege; note: comment in executor.rs says `module` arg but code uses `pid` |
 
 ---
 
