@@ -111,6 +111,7 @@ CREATE TABLE IF NOT EXISTS listeners (
     created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 ALTER TABLE listeners ADD COLUMN IF NOT EXISTS callback_host TEXT;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS seq BIGSERIAL;
 
 CREATE TABLE IF NOT EXISTS builds (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -252,4 +253,15 @@ CREATE TABLE IF NOT EXISTS audit_log (
     ip_address   TEXT,
     occurred_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+CREATE TABLE IF NOT EXISTS playbooks (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    campaign_id UUID NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+    name        TEXT NOT NULL,
+    auto_run    BOOLEAN NOT NULL DEFAULT TRUE,
+    tasks       JSONB NOT NULL DEFAULT '[]',
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_playbooks_campaign ON playbooks(campaign_id);
 `

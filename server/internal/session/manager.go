@@ -184,7 +184,7 @@ func (m *Manager) PendingTasks(ctx context.Context, sessionID string) ([]Task, e
 		WHERE id IN (
 			SELECT id FROM tasks
 			WHERE session_id = $1 AND status = 'queued' AND requires_confirmation = FALSE
-			ORDER BY created_at ASC
+			ORDER BY created_at ASC, seq ASC
 			LIMIT 10
 		)
 		RETURNING id, type, args, COALESCE(mitre_technique_id, '')`,

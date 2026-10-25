@@ -1,12 +1,70 @@
 # DungeonMaster C2 — Progress Tracker
 
-Last updated: 2026-10-24 (session 13 — codebase audit + bug fixes)
+Last updated: 2026-10-25 (session 16 — comprehensive feature testing)
 
 ---
 
 ## Current Status
 
-**Active phase:** Codebase audit complete — all critical/high bugs fixed ✅
+**Active phase:** Feature testing complete ✅ — FEATURE-TESTS.md fully updated
+
+**Session 17 complete (2026-10-25) — Bug fixes + verified:**
+
+Two bugs fixed and verified:
+
+1. **`priv/sam-dump`** — `RegSaveKeyExA` error silently ignored (`let _ = save_err` at `privesc.rs:182`). Fixed: check `save_err != 0`, delete temp file, record error, `continue`. **VERIFIED PASS** — SYSTEM session returns SAM/SYSTEM/SECURITY hive base64 on first run without pre-existing temp files.
+
+2. **Task ordering non-determinism** — tasks with equal `created_at` timestamps executed in random order. Fixed: `ALTER TABLE tasks ADD COLUMN IF NOT EXISTS seq BIGSERIAL` in `postgres.go`; ORDER BY `created_at ASC, seq ASC` in `manager.go:187`.
+
+**Also found/fixed:**
+- Build API requires `{"config": {...}}` wrapper — direct POST without it left `listener_id` empty, causing binary to embed `127.0.0.1` as C2 host instead of `10.10.10.1`
+- Builds must pass `no_evasion: true` (API field) NOT `build_flags: ["DM_NO_EVASION"]` (wrong field)
+- `DM_TLS_SKIP_VERIFY` must be `true` for self-signed cert — not set by default
+
+**Active sessions (end of session):**
+- `6e1ad0cb` — labadmin (PID 2072), session17 binary (944128 bytes)
+- `747a3ec4` — labadmin (PID 4268), session15 binary  
+- `c4663ad0` — TARGET01$/SYSTEM (PID 3652), session17 binary
+
+**Agent binary:** `C:\dev\DM-clean\Testing-builds\dm-noev2-session17.exe` (944128 bytes, build `66cb5802`)
+**Build API call format:**
+```json
+{"config":{"campaign_id":"...","listener_id":"...","target_os":"windows","sleep_seconds":5,"jitter_pct":10,"tls_skip_verify":true,"no_evasion":true}}
+```
+
+**Next:** Test remaining untested features (priv/potato, AD features); external connectivity setup (ngrok/VPS); update FEATURE-TESTS.md sam-dump status to [P].
+
+**Session 15 complete (2026-10-25) — Visual redesign:**
+
+UI/UX full design pass:
+- Replaced teal `#00d4b0` with amber `#e8a820` throughout; new deep-navy palette (`--dm-bg: #040911`)
+- Added Orbitron font (Google Fonts) for wordmarks/titles; JetBrains Mono for data
+- Border radius tokens (`--dm-radius-sm/md/lg`), smooth CSS transitions on all interactive elements
+- `index.css`: scanline overlay, ambient amber top rule, `dm-panel` / `dm-card` / `dm-btn` / `dm-input` redesign
+- `LoginPage.tsx`: Orbitron wordmark, lowercase sub-labels, TOTP field removed
+- `DashboardPage.tsx`: Orbitron nav wordmark, full-width submit buttons
+- `BuildPage.tsx`: Orbitron back link (`← DM`) + page title, feature button rounded corners, `advSummary()` → space-separated key=value (no middle dots)
+- `CampaignPage.tsx`: Orbitron nav back link + campaign name title, scope bar amber bg (teal remnant fixed)
+- `QuickStartWizard.tsx`: Back/Next navigation (← step X / Y →), sentence-case profile/mode titles, key=value meta strings, rounded card buttons with hover lift
+
+**Next:** External connectivity setup (ngrok/VPS), set Callback Host on listener, build new agent, test full session from outside LAN. Also: FEATURE-TESTS.md testing pass once external listener is live.
+
+---
+
+**Session 14 complete (2026-10-24) — Playbook feature:**
+
+Backend:
+- `server/internal/api/playbook.go` — full CRUD: list/create/get/update/delete playbooks
+- `server/internal/db/postgres.go` — `playbooks` table (campaign FK, cascade delete) + `idx_playbooks_campaign`
+- `server/internal/api/gateway.go` — 5 new routes registered under `/api/v1/campaigns/{id}/playbooks` and `/api/v1/playbooks/{id}`
+- `server/internal/api/c2.go` — `go s.runPlaybooks(req.CampaignID, resp.SessionID)` fires on every new session check-in; auto-queues tasks from all `auto_run=TRUE` playbooks for that campaign; publishes `TASK_QUEUED` bus event per task
+- Go build: exit 0 ✅
+
+Frontend:
+- `BuildPage.tsx` — Advanced accordion collapses sleep/jitter/profile/sign/TLS/ephemeral/campaign; always shows listener + OS + features; collapsed state shows one-line summary of non-default values; TypeScript clean ✅
+- `CampaignPage.tsx` — Playbook panel: list/expand/create/edit/delete playbooks, per-row task editing (label/type/args), auto_run toggle, full react-query integration; TypeScript clean ✅
+
+**Next:** External connectivity setup (ngrok/VPS), set Callback Host on listener, build new agent, test full session from outside LAN. Also: FEATURE-TESTS.md testing pass once external listener is live.
 
 **Session 13 complete (2026-10-24) — Full Go + Rust + UI audit:**
 
