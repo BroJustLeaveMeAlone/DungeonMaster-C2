@@ -93,7 +93,7 @@
 
 | Status | Feature | Notes |
 |--------|---------|-------|
-| [ ] | `priv/potato` | |
+| [P] | `priv/potato` | Impersonates SYSTEM via schtasks trigger; works from medium-integrity session |
 | [P] | `priv/sam-dump` | Requires SYSTEM + no pre-existing `~s1/s2/s3.tmp` in `%TEMP%`; returns SAM/SYSTEM/SECURITY hives as base64 JSON |
 | [P] | `priv/token-steal` | Requires elevated/SYSTEM session; impersonates SYSTEM |
 | [P] | `priv/token-make` | Args: `user`/`pass`/`domain` (NOT `username`/`password`) |
@@ -147,7 +147,7 @@
 | [E] | `collect/vault` | CredEnumerateW — no creds in Credential Manager |
 | [E] | `collect/browser-creds` | No browser installed |
 | [E] | `collect/browser-history` | No browser installed |
-| [ ] | `collect/dpapi` | |
+| [E] | `collect/dpapi` | Requires `blob` arg (base64 DPAPI ciphertext); used internally by browser-creds; no standalone blob in test env |
 | [E] | `collect/screen-record` | Returns empty base64 frames in headless/non-interactive session (no display context) |
 | [P] | `collect/file-search` | Args: glob (pattern), path (search root) |
 | [P] | `collect/ssh-keys` | Returns empty object if no keys present |
